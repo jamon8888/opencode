@@ -32,6 +32,8 @@ pub struct PiiEngine {
     detector: Detector,
     /// Shared vault for consistent pseudonymization across calls.
     vault: Arc<Mutex<Vault>>,
+    /// Whether L2/NER is configured. False = L1 only (degraded mode).
+    has_ner: bool,
 }
 
 impl PiiEngine {
@@ -51,15 +53,17 @@ impl PiiEngine {
         Ok(Self {
             detector,
             vault: Arc::new(Mutex::new(vault)),
+            has_ner: false,
         })
     }
 
     /// Create an engine from explicit configuration.
-    pub fn new(config: &DetectionConfig, vault: Vault) -> anyhow::Result<Self> {
+    pub fn new(config: &DetectionConfig, vault: Vault, has_ner: bool) -> anyhow::Result<Self> {
         let detector = Detector::from_config(config)?;
         Ok(Self {
             detector,
             vault: Arc::new(Mutex::new(vault)),
+            has_ner,
         })
     }
 
@@ -79,9 +83,8 @@ impl PiiEngine {
         // L1 detection (patterns + financial)
         let entities = self.detector.detect(text)?;
 
-        // We always use L1 only in this implementation; mark L2 as degraded
-        // when no NER is configured (load_for_test path).
-        *ner_degraded = true; // L2/NER not loaded in this implementation
+        // ner_degraded = true only when L2/NER is NOT configured.
+        *ner_degraded = !self.has_ner;
 
         if entities.is_empty() {
             // Fast-path: return original text unchanged
