@@ -1,3 +1,10 @@
+pub mod tools;
+#[allow(unused_imports)]
+pub use tools::{
+    anonymize_text, deanonymize_response, ingest_document, list_documents,
+    delete_document, audit_report, search_documents,
+};
+
 use std::sync::Arc;
 
 use rmcp::{
@@ -10,6 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     audit::{now_unix, AuditEvent, AuditLog},
+    clients::metrics::metrics,
     extraction::extract_text,
     state::AppState,
 };
@@ -130,6 +138,7 @@ impl GdprServer {
 
         // 2. Anonymize in a blocking thread — PiiEngine is CPU-only (regex + AES).
         //    L1 failure is fatal per Invariant I1.
+        let anonymize_start = std::time::Instant::now();
         let engine_arc = Arc::clone(&self.state.pii_engine);
         let anonymize_result = tokio::task::spawn_blocking(move || {
             let mut engine = engine_arc
@@ -189,6 +198,24 @@ impl GdprServer {
         // 4. Audit trail (GDPR Art. 30) — written after successful store
         self.audit
             .record(AuditEvent::Ingest { doc_id: &doc_id, pii_count: result.pii_count });
+
+        // 5. Prometheus metrics
+        {
+            let m = metrics();
+            for entity in &result.entities {
+                let layer = format!("{:?}", entity.source).to_lowercase();
+                m.pii_detected.with_label_values(&[&layer]).inc();
+            }
+            m.documents_ingested.inc();
+            if ner_degraded {
+                m.ner_degraded.inc();
+            }
+            m.detector_latency_ms
+                .observe(anonymize_start.elapsed().as_millis() as f64);
+            m.cb_state
+                .with_label_values(&["kreuzberg"])
+                .set(if self.state.kreuzberg_cb.is_open() { 1.0 } else { 0.0 });
+        }
 
         let resp = IngestResponse { doc_id, pii_count: result.pii_count, ner_degraded };
         let json = serde_json::to_string(&resp).unwrap_or_else(|e| {
@@ -337,6 +364,7 @@ impl GdprServer {
                 drop(db); // release DB lock before audit write
                 // Audit after confirmed delete (C3 fix: only record what actually happened)
                 self.audit.record(AuditEvent::Delete { doc_id });
+                metrics().deletes.inc();
                 let json = serde_json::to_string(&DeleteResponse { erased: doc_id.clone() })
                     .unwrap_or_else(|e| format!(r#"{{"error":"serialization failed: {e}"}}"#));
                 Ok(CallToolResult::success(vec![Content::text(json)]))

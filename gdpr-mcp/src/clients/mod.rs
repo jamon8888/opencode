@@ -4,3 +4,6 @@
 // are written to rusqlite for now, which is sufficient for single-node deployments.
 // When ClickHouse becomes a hard requirement, add a `clickhouse::Client` here and
 // wire it into `AppState`.
+
+pub mod metrics;
+pub use metrics::{gather_text, metrics};
