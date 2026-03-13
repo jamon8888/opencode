@@ -1,0 +1,31 @@
+[package]
+name    = "gdpr-mcp"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum              = "0.8"
+tokio             = { version = "1", features = ["full"] }
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+anyhow            = "1"
+thiserror         = "2"
+uuid              = { version = "1", features = ["v4"] }
+regex             = "1"
+
+# TODO: add back cloakpipe-core
+# cloakpipe-core    = { git = "https://github.com/rohansx/cloakpipe", package = "cloakpipe-core" }
+kreuzberg         = { version = "4", features = ["pdf", "office", "tokio-runtime"] }
+
+rusqlite          = { version = "0.32", features = ["bundled"] }
+clickhouse        = "0.12"
+qdrant-client     = "1"
+
+rmcp              = "0.1"
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+prometheus        = { version = "0.13", features = ["process"] }
+
+[dev-dependencies]
+tempfile   = "3"
+tokio-test = "0.4"
