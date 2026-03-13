@@ -23,9 +23,25 @@ tracing           = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 prometheus        = { version = "0.13", features = ["process"] }
 
+# HTTP proxy (conversation anonymization path)
+axum        = "0.8"
+
+# L2 NER — Rust-native GLiNER inference, no Python sidecar
+gline-rs             = "1"
+unicode-segmentation = "1"
+num_cpus             = "1"
+
+# ClickHouse audit trail + proxy upstream forwarding
+reqwest     = { version = "0.12", features = ["json", "stream"] }
+
 [dev-dependencies]
 tempfile   = "3"
 tokio-test = "0.4"
+
+[features]
+# Gate L2: build without --features ner avoids linking ONNX Runtime.
+# The binary degrades gracefully to L1-only when model absent.
+ner = []
 
 # Public library items appear unused from the binary's reachability perspective.
 # Suppress the spurious dead_code / unused_imports lints globally.
