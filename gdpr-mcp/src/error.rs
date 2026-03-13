@@ -3,7 +3,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum GdprError {
     #[error("PII detection failed: {0}")]
-    PiiDetection(#[from] anyhow::Error),
+    PiiDetection(anyhow::Error),
 
     #[error("Extraction failed: {0}")]
     Extraction(String),

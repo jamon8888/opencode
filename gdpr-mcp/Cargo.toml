@@ -13,12 +13,12 @@ thiserror         = "2"
 uuid              = { version = "1", features = ["v4"] }
 regex             = "1"
 
-cloakpipe-core    = { git = "https://github.com/rohansx/cloakpipe", package = "cloakpipe-core" }
+cloakpipe-core    = { git = "https://github.com/rohansx/cloakpipe", package = "cloakpipe-core", rev = "55a6b06c33578cee6d3b456ffbb8dd73e10750c4" }
 kreuzberg         = { version = "4", features = ["pdf", "office", "ocr", "tokio-runtime"] }
 
 # cloakpipe-core requires rusqlite ^0.32, so ">=0.31" is used as a compromise
 # to satisfy both the spec requirement (0.31 minimum) and the transitive dep (0.32).
-rusqlite          = { version = ">=0.31", features = ["bundled"] }
+rusqlite          = { version = "0.32", features = ["bundled"] }
 clickhouse        = "0.12"
 qdrant-client     = "1"
 
