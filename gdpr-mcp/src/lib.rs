@@ -10,5 +10,6 @@ pub mod extraction;
 pub mod mcp;
 pub mod ner;
 pub mod pii;
+pub mod proxy;
 pub mod resilience;
 pub mod state;
