@@ -36,6 +36,18 @@ fn test_chunks_cover_full_text() {
     }
 }
 
+#[test]
+fn test_chunk_text_overlap_ge_max_tokens_does_not_hang() {
+    // overlap (5) >= max_tokens (3) must not hang
+    let text = "a b c d e f g h";
+    let chunks = chunk_text(&text, 3, 5);
+    assert!(!chunks.is_empty(), "must produce at least one chunk");
+    // All words must be covered
+    for word in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        assert!(chunks.iter().any(|c| c.text.contains(word)), "{word} not covered");
+    }
+}
+
 // ── GlinerNer graceful degradation ────────────────────────────────────────────
 
 #[test]

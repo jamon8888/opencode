@@ -120,7 +120,7 @@ pub fn chunk_text(text: &str, max_tokens: usize, overlap: usize) -> Vec<Chunk> {
         let e_b   = if end < words.len() { words[end].0 } else { text.len() };
         chunks.push(Chunk { text: text[s_b..e_b].to_string(), offset: s_b });
         if end == words.len() { break; }
-        start = end.saturating_sub(overlap);
+        start = end.saturating_sub(overlap).max(start + 1);
     }
     chunks
 }
