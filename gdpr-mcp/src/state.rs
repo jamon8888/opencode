@@ -1,13 +1,14 @@
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rusqlite::Connection;
 
 use crate::{
     audit::DocAuditDb,
-    pii::PiiEngine,
+    clients::clickhouse::ClickHouseClient,
+    pii::{EnginePool, PiiEngine},
     resilience::CircuitBreaker,
 };
-use std::time::Duration;
 
 /// Shared application state threaded through all MCP tool handlers.
 pub struct AppState {
@@ -17,6 +18,10 @@ pub struct AppState {
     pub doc_audit: DocAuditDb,
     /// Circuit breaker protecting kreuzberg document extraction calls.
     pub kreuzberg_cb: Arc<CircuitBreaker>,
+    /// N-slot pool for the HTTP proxy path (concurrent anonymization).
+    pub engine_pool: Arc<EnginePool>,
+    /// ClickHouse audit trail client (GDPR Art. 30). None if CLICKHOUSE_URL unset.
+    pub clickhouse: Option<Arc<ClickHouseClient>>,
 }
 
 impl AppState {
@@ -24,11 +29,23 @@ impl AppState {
     pub fn new(pii_engine: PiiEngine, db: Connection) -> anyhow::Result<Self> {
         init_schema(&db)?;
         let db_arc = Arc::new(Mutex::new(db));
+
+        // Pool size = num CPUs (regex + ONNX is CPU-bound; more slots than cores = contention)
+        let pool_size   = num_cpus::get().max(2);
+        let engine_pool = EnginePool::new(pii_engine.try_clone()?, pool_size)?;
+
+        let clickhouse = std::env::var("CLICKHOUSE_URL").ok().map(|url| {
+            tracing::info!(url = %url, "ClickHouse audit trail enabled");
+            ClickHouseClient::new(&url)
+        });
+
         Ok(Self {
             pii_engine: Arc::new(Mutex::new(pii_engine)),
             doc_audit: DocAuditDb::from_shared(Arc::clone(&db_arc)),
             db: db_arc,
             kreuzberg_cb: CircuitBreaker::new("kreuzberg", 5, Duration::from_secs(30)),
+            engine_pool,
+            clickhouse,
         })
     }
 }
