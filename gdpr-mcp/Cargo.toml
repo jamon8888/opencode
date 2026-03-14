@@ -38,6 +38,14 @@ reqwest     = { version = "0.12", features = ["json", "stream"] }
 tempfile   = "3"
 tokio-test = "0.4"
 
+# Reduce debug info to avoid LNK1318 PDB size limit on Windows MSVC.
+# Full debuginfo with this many deps (reqwest+axum+gline-rs+kreuzberg) overflows the 4GB PDB limit.
+[profile.dev]
+debug = 1
+
+[profile.test]
+debug = 1
+
 [features]
 # Gate L2: build without --features ner avoids linking ONNX Runtime.
 # The binary degrades gracefully to L1-only when model absent.
