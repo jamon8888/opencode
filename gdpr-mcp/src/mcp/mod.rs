@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::{
     audit::{now_unix, AuditEvent, AuditLog},
-    clients::metrics::metrics,
+    clients::{clickhouse::GdprAuditRow, metrics::metrics},
     extraction::extract_text,
     state::AppState,
 };
@@ -217,6 +217,28 @@ impl GdprServer {
                 .set(if self.state.kreuzberg_cb.is_open() { 1.0 } else { 0.0 });
         }
 
+        // ClickHouse audit trail (GDPR Art. 30) — fire-and-forget, non-blocking
+        if let Some(ch) = &self.state.clickhouse {
+            let ch  = Arc::clone(ch);
+            let d_id = doc_id.clone();
+            let pc   = result.pii_count as u32;
+            let nd   = ner_degraded;
+            let ms   = anonymize_start.elapsed().as_millis() as u32;
+            tokio::spawn(async move {
+                ch.record(GdprAuditRow {
+                    document_id:        d_id,
+                    action:             "ingest".into(),
+                    pii_count_before:   pc,
+                    pii_count_after:    0,
+                    ner_degraded:       nd,
+                    processing_time_ms: ms,
+                    legal_basis:        "legitimate_interest".into(),
+                    user_id:            String::new(),
+                    model_version:      "gliner-pii-edge-v1.0".into(),
+                }).await;
+            });
+        }
+
         let resp = IngestResponse { doc_id, pii_count: result.pii_count, ner_degraded };
         let json = serde_json::to_string(&resp).unwrap_or_else(|e| {
             format!(r#"{{"error":"serialization failed: {e}"}}"#)
@@ -365,6 +387,24 @@ impl GdprServer {
                 // Audit after confirmed delete (C3 fix: only record what actually happened)
                 self.audit.record(AuditEvent::Delete { doc_id });
                 metrics().deletes.inc();
+                // ClickHouse audit trail — fire-and-forget
+                if let Some(ch) = &self.state.clickhouse {
+                    let ch   = Arc::clone(ch);
+                    let d_id = doc_id.clone();
+                    tokio::spawn(async move {
+                        ch.record(GdprAuditRow {
+                            document_id:        d_id,
+                            action:             "delete".into(),
+                            pii_count_before:   0,
+                            pii_count_after:    0,
+                            ner_degraded:       false,
+                            processing_time_ms: 0,
+                            legal_basis:        "legal_obligation".into(),
+                            user_id:            String::new(),
+                            model_version:      String::new(),
+                        }).await;
+                    });
+                }
                 let json = serde_json::to_string(&DeleteResponse { erased: doc_id.clone() })
                     .unwrap_or_else(|e| format!(r#"{{"error":"serialization failed: {e}"}}"#));
                 Ok(CallToolResult::success(vec![Content::text(json)]))
