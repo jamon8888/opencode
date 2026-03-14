@@ -13,6 +13,8 @@ use cloakpipe_core::{
 };
 use std::sync::{Arc, Mutex};
 
+use crate::ner::GlinerNer;
+
 /// Result of anonymizing a piece of text.
 #[derive(Debug, Clone)]
 pub struct AnonymizeResult {
@@ -34,6 +36,8 @@ pub struct PiiEngine {
     vault: Arc<Mutex<Vault>>,
     /// Whether L2/NER is configured. False = L1 only (degraded mode).
     has_ner: bool,
+    /// Optional L2 NER model (GLiNER). Shared across EnginePool slots via Arc.
+    gliner: Option<Arc<GlinerNer>>,
 }
 
 impl PiiEngine {
@@ -54,6 +58,7 @@ impl PiiEngine {
             detector,
             vault: Arc::new(Mutex::new(vault)),
             has_ner: false,
+            gliner: None,
         })
     }
 
@@ -64,6 +69,37 @@ impl PiiEngine {
             detector,
             vault: Arc::new(Mutex::new(vault)),
             has_ner,
+            gliner: None,
+        })
+    }
+
+    /// Production constructor: loads GLiNER from `model_dir` if present, degrades to L1 otherwise.
+    pub fn load_production(vault_path: &str, model_dir: &str) -> anyhow::Result<Self> {
+        let config   = Self::default_detection_config()?;
+        let detector = Detector::from_config(&config)?;
+        let key      = Self::key_from_env();
+        let vault    = Vault::open(vault_path, key)?;
+        let gliner   = GlinerNer::load(model_dir)?;
+        Ok(Self {
+            detector,
+            vault:   Arc::new(Mutex::new(vault)),
+            has_ner: gliner.is_some(),
+            gliner:  gliner.map(Arc::new),
+        })
+    }
+
+    /// Cheap clone for EnginePool slot construction.
+    ///
+    /// Each slot gets a fresh `Detector` (stateless, cheap to create).
+    /// `Vault` and `GlinerNer` are `Arc::clone` — pseudonym consistency and one ONNX session.
+    pub fn try_clone(&self) -> anyhow::Result<Self> {
+        let config   = Self::default_detection_config()?;
+        let detector = Detector::from_config(&config)?;
+        Ok(Self {
+            detector,
+            vault:   Arc::clone(&self.vault),
+            has_ner: self.has_ner,
+            gliner:  self.gliner.clone(),
         })
     }
 
@@ -107,6 +143,21 @@ impl PiiEngine {
             ner_degraded: *ner_degraded,
             pii_count,
         })
+    }
+
+    /// Batch anonymization — L1 per-text then optional L2 (stub: always None for now).
+    ///
+    /// Invariant I1: L1 failure returns `Err` (fatal — never pass raw text through).
+    /// Invariant I2: L2 absent sets `ner_degraded = true`, continues with L1 only.
+    pub fn anonymize_batch(
+        &mut self,
+        texts: &[&str],
+        ner_degraded: &mut bool,
+    ) -> anyhow::Result<Vec<AnonymizeResult>> {
+        *ner_degraded = !self.has_ner;
+        texts.iter()
+            .map(|t| self.anonymize(t, ner_degraded))
+            .collect()
     }
 
     /// Rehydrate a text that was previously anonymized, restoring original values.
