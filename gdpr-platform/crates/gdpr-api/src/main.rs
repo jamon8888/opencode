@@ -8,6 +8,7 @@ mod error;
 mod router;
 mod handlers;
 mod middleware;
+mod clients;
 
 pub use state::AppState;
 
@@ -96,6 +97,16 @@ async fn main() -> Result<()> {
     let pii_engine = gdpr_core::pii::engine::PiiEngine::load_production(&vault_path, &model_dir)?;
     let engine_pool = Arc::new(gdpr_core::pii::pool::EnginePool::new(pool_size, pii_engine)?);
 
+    // Optional ClickHouse audit client — skipped gracefully if CLICKHOUSE_URL not set
+    let clickhouse = std::env::var("CLICKHOUSE_URL").ok().map(|url| {
+        tracing::info!(%url, "ClickHouse audit trail enabled");
+        crate::clients::ClickHouseClient::new(url, reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("ClickHouse reqwest client"))
+    });
+
     let state = AppState {
         db: api_pool,
         keys: Arc::new(dashmap::DashMap::new()),
@@ -105,6 +116,7 @@ async fn main() -> Result<()> {
         upstream_url,
         session_cache,
         engine_pool,
+        clickhouse,
     };
 
     let app  = router::build(state);

@@ -90,6 +90,9 @@ pub async fn post_chat_completions(
     .map_err(|e| ApiError::Internal(anyhow::anyhow!("spawn_blocking join error: {e}")))?
     .map_err(|e| ApiError::Internal(e))?;
 
+    // Capture PII entity count before batch_results is consumed by later iterators
+    let pii_count: u32 = batch_results.iter().map(|r| r.mappings.len() as u32).sum();
+
     // ── Step 3: Build session token map and store in session_cache ────────
     let token_map: DashMap<String, String> = DashMap::new();
     for result in &batch_results {
@@ -173,6 +176,26 @@ pub async fn post_chat_completions(
         let mut r = axum::response::Response::new(body);
         *r.status_mut() = status;
         *r.headers_mut() = resp_headers;
+
+        // Emit GDPR Art. 30 audit row for SSE path (best-effort)
+        if let Some(ch) = &state.clickhouse {
+            let row = crate::clients::GdprAuditRow {
+                document_id:          session_id.clone(),
+                action:               "query".to_string(),
+                pii_count_before:     pii_count,
+                pii_count_after:      0,
+                ner_degraded:         0,
+                processing_time_ms:   0,
+                legal_basis:          "contract".to_string(),
+                user_id:              "anonymous".to_string(),
+                model_version:        "gdpr-api".to_string(),
+                ai_act_risk_level:    "low".to_string(),
+                decision_explanation: String::new(),
+            };
+            let ch = Arc::clone(ch);
+            tokio::spawn(async move { ch.write_audit_row(row).await });
+        }
+
         return Ok(r);
     }
 
@@ -227,6 +250,25 @@ pub async fn post_chat_completions(
                 }).await;
             }
         }
+    }
+
+    // Emit GDPR Art. 30 audit row (best-effort — never blocks response)
+    if let Some(ch) = &state.clickhouse {
+        let row = crate::clients::GdprAuditRow {
+            document_id:          session_id.clone(),
+            action:               "query".to_string(),
+            pii_count_before:     pii_count,
+            pii_count_after:      0,
+            ner_degraded:         0,
+            processing_time_ms:   0,
+            legal_basis:          "contract".to_string(),
+            user_id:              "anonymous".to_string(),
+            model_version:        "gdpr-api".to_string(),
+            ai_act_risk_level:    "low".to_string(),
+            decision_explanation: String::new(),
+        };
+        let ch = Arc::clone(ch);
+        tokio::spawn(async move { ch.write_audit_row(row).await });
     }
 
     let mut r = axum::response::Response::new(Body::from(rehydrated));

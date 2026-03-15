@@ -11,6 +11,7 @@ pub struct AppState {
     pub upstream_url:  String,
     pub session_cache: Arc<DashMap<String, SessionCache>>,
     pub engine_pool:   Arc<gdpr_core::pii::pool::EnginePool>,
+    pub clickhouse:    Option<Arc<crate::clients::ClickHouseClient>>,
 }
 
 #[derive(Clone, Debug)]
