@@ -9,6 +9,8 @@ mod router;
 mod handlers;
 mod middleware;
 mod clients;
+pub mod pagination;
+pub mod extractors;
 
 pub use state::AppState;
 
@@ -107,16 +109,28 @@ async fn main() -> Result<()> {
             .expect("ClickHouse reqwest client"))
     });
 
+    let tensorzero_key = std::env::var("TENSORZERO_API_KEY").unwrap_or_default();
+    let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_default();
+
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()?;
+
     let state = AppState {
         db: api_pool,
         keys: Arc::new(dashmap::DashMap::new()),
-        http: reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()?,
-        upstream_url,
+        http: http_client.clone(),
+        upstream_url: upstream_url.clone(),
         session_cache,
         engine_pool,
         clickhouse,
+        // New T4 fields
+        vec_store: None,
+        http_client,
+        key_cache: Arc::new(dashmap::DashMap::new()),
+        tensorzero_base_url: upstream_url,
+        tensorzero_key,
+        jwt_secret,
     };
 
     let app  = router::build(state);
