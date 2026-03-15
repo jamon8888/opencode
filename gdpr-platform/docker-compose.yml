@@ -1,0 +1,146 @@
+services:
+
+  # ── gdpr-api — REST API + PII engine ──────────────────────────────────────
+  gdpr-api:
+    build:
+      context: .
+      dockerfile: crates/gdpr-api/Dockerfile
+    image: gdpr-api:latest
+    restart: unless-stopped
+    environment:
+      CLOAKPIPE_VAULT_KEY: ${CLOAKPIPE_VAULT_KEY:?Set CLOAKPIPE_VAULT_KEY in .env}
+      CLICKHOUSE_URL:      http://clickhouse:8123
+      EMBEDDING_URL:       ${EMBEDDING_URL:-http://ollama:11434/v1}
+      EMBEDDING_MODEL:     ${EMBEDDING_MODEL:-nomic-embed-text}
+      TENSORZERO_URL:      http://tensorzero:3000/openai/v1
+      TENSORZERO_KEY:      ${TENSORZERO_KEY:-hacienda}
+      BIND_ADDR:           0.0.0.0:8443
+      RUST_LOG:            ${RUST_LOG:-info}
+    volumes:
+      - gdpr-data:/data
+      - ./models:/models:ro
+    ports:
+      - "${GDPR_API_PORT:-8443}:8443"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+      tensorzero:
+        condition: service_healthy
+    networks:
+      - gdpr-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8443/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # ── gdpr-mcp — MCP server + anonymization proxy ───────────────────────────
+  # No GLiNER model mounted: degrades gracefully to L1 (regex) NER only.
+  # Mount ./models:/models:ro and set GLINER_MODEL_DIR to enable L2 NER.
+  gdpr-mcp:
+    build:
+      context: .
+      dockerfile: crates/gdpr-mcp/Dockerfile
+    image: gdpr-mcp:latest
+    restart: unless-stopped
+    environment:
+      CLOAKPIPE_VAULT_KEY: ${CLOAKPIPE_VAULT_KEY:?Set CLOAKPIPE_VAULT_KEY in .env}
+      TENSORZERO_URL:      http://tensorzero:3000/openai/v1
+      TENSORZERO_KEY:      ${TENSORZERO_KEY:-hacienda}
+      PROXY_ADDR:          0.0.0.0:8080
+      # Forward-compat: will be used when gdpr-mcp becomes a pure thin client
+      GDPR_API_URL:        http://gdpr-api:8443
+      GDPR_API_KEY:        ${GDPR_API_KEY:-}
+      RUST_LOG:            ${RUST_LOG:-info}
+    ports:
+      - "${GDPR_MCP_PROXY_PORT:-8080}:8080"
+    depends_on:
+      gdpr-api:
+        condition: service_healthy
+      tensorzero:
+        condition: service_healthy
+    networks:
+      - gdpr-net
+
+  # ── TensorZero — data flywheel + A/B testing ──────────────────────────────
+  tensorzero:
+    image: tensorzero/gateway:latest
+    restart: unless-stopped
+    environment:
+      TENSORZERO_CLICKHOUSE_URL: http://default:@clickhouse:8123/tensorzero
+    volumes:
+      - ./config/tensorzero:/config:ro
+    command: ["--config-file", "/config/tensorzero.toml"]
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    networks:
+      - gdpr-net
+
+  # ── Ollama — local LLM + embedding inference ───────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    entrypoint: >
+      /bin/sh -c "
+        ollama serve &
+        until wget -q --spider http://localhost:11434/api/tags 2>/dev/null; do sleep 2; done &&
+        ollama pull ${OLLAMA_MODEL:-mistral} &&
+        ollama pull nomic-embed-text &&
+        wait
+      "
+    volumes:
+      - ollama-models:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    networks:
+      - gdpr-net
+
+  # ── ClickHouse — GDPR Art. 30 immutable audit trail ────────────────────────
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: gdpr
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./config/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "8123:8123"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - gdpr-net
+
+volumes:
+  gdpr-data:
+  clickhouse-data:
+  ollama-models:
+
+networks:
+  gdpr-net:
+    driver: bridge
