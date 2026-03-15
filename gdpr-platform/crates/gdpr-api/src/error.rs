@@ -13,26 +13,42 @@ pub struct ProblemDetail {
     pub detail:  String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ApiError {
     // Kept from prior version
+    #[error("not found: {0}")]
     NotFound(String),
+    #[error("unauthorized")]
     Unauthorized,
+    #[error("rate limit exceeded")]
     RateLimited,
+    #[error("validation error: {0}")]
     Validation(String),
+    #[error("internal error: {0}")]
     Internal(String),
+    #[error("upstream error: {0}")]
     Upstream(String),
+    #[error("usage cap exceeded")]
     UsageCapExceeded,
 
     // New variants
+    #[error("request body too large")]
     BodyTooLarge,
+    #[error("api key has been revoked")]
     KeyRevoked,
+    #[error("forbidden: {0}")]
     Forbidden(String),
+    #[error("conflict: {0}")]
     Conflict(String),
+    #[error("pii detection failed")]
     PiiDetectionFailed,
+    #[error("unknown profile: {0}")]
     UnknownProfile(String),
+    #[error("rate limit exceeded, retry after {retry_after_secs}s")]
     RateLimit { retry_after_secs: u64 },
+    #[error("database error: {0}")]
     Database(String),
+    #[error("service unavailable: {0}")]
     ServiceUnavailable(String),
 }
 
@@ -75,10 +91,11 @@ impl IntoResponse for ApiError {
             ApiError::UnknownProfile(d)      => (StatusCode::BAD_REQUEST,             "unknown-profile",      d.clone()),
             ApiError::RateLimited            => (StatusCode::TOO_MANY_REQUESTS,       "rate-limited",         "Rate limit exceeded".to_string()),
             ApiError::RateLimit { .. }       => (StatusCode::TOO_MANY_REQUESTS,       "rate-limit",           "Rate limit exceeded".to_string()),
-            ApiError::Database(d)            => (StatusCode::INTERNAL_SERVER_ERROR,   "database",             d.clone()),
-            ApiError::Upstream(d)            => (StatusCode::BAD_GATEWAY,             "upstream",             d.clone()),
-            ApiError::Internal(d)            => (StatusCode::INTERNAL_SERVER_ERROR,   "internal",             d.clone()),
-            ApiError::ServiceUnavailable(d)  => (StatusCode::SERVICE_UNAVAILABLE,     "service-unavailable",  d.clone()),
+            // 5xx: log internal detail server-side, return generic message to client (GDPR/security)
+            ApiError::Database(d)            => { tracing::error!(internal = %d, "database error"); (StatusCode::INTERNAL_SERVER_ERROR,   "database",             "A database error occurred".to_string()) }
+            ApiError::Upstream(d)            => { tracing::error!(internal = %d, "upstream error"); (StatusCode::BAD_GATEWAY,             "upstream",             "An upstream service error occurred".to_string()) }
+            ApiError::Internal(d)            => { tracing::error!(internal = %d, "internal error"); (StatusCode::INTERNAL_SERVER_ERROR,   "internal",             "An internal error occurred".to_string()) }
+            ApiError::ServiceUnavailable(d)  => { tracing::error!(internal = %d, "service unavailable"); (StatusCode::SERVICE_UNAVAILABLE, "service-unavailable",  "Service temporarily unavailable".to_string()) }
             ApiError::UsageCapExceeded       => (StatusCode::PAYMENT_REQUIRED,        "cap-exceeded",         "Monthly usage cap exceeded".to_string()),
         };
 

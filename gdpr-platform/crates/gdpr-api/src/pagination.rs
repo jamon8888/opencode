@@ -12,8 +12,11 @@ fn default_page() -> u32 { 1 }
 fn default_limit() -> u32 { 20 }
 
 impl PaginationParams {
-    pub fn limit(&self) -> u32 { self.limit.min(100) }
-    pub fn offset(&self) -> u32 { (self.page.saturating_sub(1)) * self.limit() }
+    /// Returns the effective limit, clamped to [1, 100].
+    pub fn limit(&self) -> u32 { self.limit.max(1).min(100) }
+
+    /// Returns the zero-based offset. page is clamped to a minimum of 1.
+    pub fn offset(&self) -> u32 { (self.page.max(1) - 1) * self.limit() }
 }
 
 #[derive(Debug, Serialize)]
@@ -53,8 +56,21 @@ mod tests {
     }
 
     #[test]
+    fn test_limit_min_1() {
+        let p = PaginationParams { page: 1, limit: 0 };
+        assert_eq!(p.limit(), 1);
+    }
+
+    #[test]
     fn test_offset_page_1() {
         let p = PaginationParams { page: 1, limit: 20 };
+        assert_eq!(p.offset(), 0);
+    }
+
+    #[test]
+    fn test_offset_page_0_same_as_page_1() {
+        // page=0 should be treated as page=1 (offset=0), not produce underflow
+        let p = PaginationParams { page: 0, limit: 20 };
         assert_eq!(p.offset(), 0);
     }
 
