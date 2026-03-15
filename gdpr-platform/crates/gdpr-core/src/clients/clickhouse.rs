@@ -1,7 +1,10 @@
 //! ClickHouse audit client (GDPR Art. 30 immutable audit trail).
 //!
-//! OPT-4: Batched writes via `write_batch` replace per-row POSTs.
-//! Writes `GdprAuditRow` records via the ClickHouse HTTP interface.
+//! Phase 3: Extended with 4 new tables:
+//!   - gdpr_sessions   — session vault tracking
+//!   - gdpr_profiles   — profile usage telemetry (SummingMergeTree)
+//!   - gdpr_keys       — API key audit trail (ReplacingMergeTree)
+//!   - gdpr_billing    — metered usage per API key (SummingMergeTree)
 //!
 //! Fault tolerance:
 //! - Circuit breaker: CB:10 failures / 10s cooldown.
@@ -17,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::resilience::CircuitBreaker;
 
 const BUFFER_CAP: usize = 10_000;
-/// OPT-4: Maximum rows per batch write to ClickHouse.
+/// Maximum rows per batch write to ClickHouse.
 const BATCH_SIZE: usize = 500;
 
 // ── Row structs ───────────────────────────────────────────────────────────────
@@ -42,35 +45,55 @@ pub struct GdprAuditRow {
     pub decision_explanation: String,
 }
 
-/// OPT-4: Session-level row for per-request billing / analytics.
+/// Session vault tracking — maps to `gdpr_sessions` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GdprSessionRow {
-    pub session_id:         String,
-    pub user_id:            String,
-    pub request_type:       String,
-    pub pii_count:          u32,
-    pub processing_time_ms: u32,
-    pub ts_unix:            i64,
+    pub session_id:  String,
+    pub api_key_id:  String,
+    pub started_at:  u64,
+    pub ended_at:    u64,
+    pub token_count: u32,
+    pub doc_ids:     Vec<String>,
 }
 
-/// OPT-4: Billing row for per-profile usage tracking.
+/// Profile usage telemetry — maps to `gdpr_profiles` table.
+/// SummingMergeTree accumulates `usage_count` automatically.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GdprProfileRow {
+    pub profile_name:  String,
+    pub api_key_id:    String,
+    pub usage_count:   u64,
+    pub avg_pii_count: f32,
+}
+
+/// API key audit trail — maps to `gdpr_keys` table.
+/// ReplacingMergeTree deduplicates on (key_id, ts_unix).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GdprKeyRow {
+    pub key_id:     String,
+    pub event:      String,
+    pub api_key_id: String,
+}
+
+/// Metered usage per API key — maps to `gdpr_billing` table.
+/// SummingMergeTree accumulates all numeric columns.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GdprBillingRow {
-    pub billing_id:   String,
-    pub user_id:      String,
-    pub profile:      String,
-    pub doc_count:    u32,
-    pub pii_count:    u32,
-    pub ts_unix:      i64,
+    pub api_key_id:      String,
+    pub month:           String,
+    pub tokens_in:       u64,
+    pub tokens_out:      u64,
+    pub documents_count: u32,
+    pub requests_count:  u32,
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
 
 pub struct ClickHouseClient {
-    url:     String,
-    cb:      Arc<CircuitBreaker>,
-    buffer:  Mutex<VecDeque<GdprAuditRow>>,
-    http:    reqwest::Client,
+    url:    String,
+    cb:     Arc<CircuitBreaker>,
+    buffer: Mutex<VecDeque<GdprAuditRow>>,
+    http:   reqwest::Client,
 }
 
 impl ClickHouseClient {
@@ -86,6 +109,8 @@ impl ClickHouseClient {
                         .expect("reqwest client"),
         }
     }
+
+    // ── gdpr_audit ────────────────────────────────────────────────────────────
 
     /// Record a GDPR audit event.
     ///
@@ -110,37 +135,83 @@ impl ClickHouseClient {
         }
     }
 
-    /// OPT-4: Record a session-level row.
+    // ── gdpr_sessions ─────────────────────────────────────────────────────────
+
+    /// Record a session-level row into `gdpr_sessions`.
     pub async fn record_session(&self, row: GdprSessionRow) {
-        if let Err(e) = self.write_ndjson("gdpr_sessions", &[row]).await {
+        if let Err(e) = self.write_batch_table("gdpr_sessions", &[row]).await {
             tracing::warn!(error = %e, "ClickHouse session write failed");
         }
     }
 
-    /// OPT-4: Record a profile usage row.
-    pub async fn record_profile_usage(&self, row: GdprBillingRow) {
-        if let Err(e) = self.write_ndjson("gdpr_billing", &[row]).await {
-            tracing::warn!(error = %e, "ClickHouse billing write failed");
+    // ── gdpr_profiles ─────────────────────────────────────────────────────────
+
+    /// Record a profile usage increment into `gdpr_profiles`.
+    /// SummingMergeTree accumulates `usage_count` server-side.
+    pub async fn record_profile_usage(&self, row: GdprProfileRow) {
+        if let Err(e) = self.write_batch_table("gdpr_profiles", &[row]).await {
+            tracing::warn!(error = %e, "ClickHouse profile usage write failed");
         }
     }
 
-    /// OPT-4: Record a key event (e.g. vault rotation, config change).
-    pub async fn record_key_event(&self, event: &str, detail: &str) {
-        let body = serde_json::json!({ "event": event, "detail": detail,
-            "ts_unix": crate::audit::now_unix() }).to_string();
-        if let Err(e) = self.post_ndjson("gdpr_key_events", &body).await {
+    // ── gdpr_keys ─────────────────────────────────────────────────────────────
+
+    /// Record an API key lifecycle event into `gdpr_keys`.
+    pub async fn record_key_event(&self, row: GdprKeyRow) {
+        if let Err(e) = self.write_batch_table("gdpr_keys", &[row]).await {
             tracing::warn!(error = %e, "ClickHouse key_event write failed");
         }
     }
 
-    /// OPT-4: Record a billing summary row.
+    // ── gdpr_billing ──────────────────────────────────────────────────────────
+
+    /// Record metered usage into `gdpr_billing`.
+    /// SummingMergeTree accumulates numeric columns server-side.
     pub async fn record_billing(&self, row: GdprBillingRow) {
-        self.record_profile_usage(row).await;
+        if let Err(e) = self.write_batch_table("gdpr_billing", &[row]).await {
+            tracing::warn!(error = %e, "ClickHouse billing write failed");
+        }
     }
+
+    // ── diagnostics ───────────────────────────────────────────────────────────
 
     /// Number of rows currently in the ring buffer (test helper + metrics).
     pub fn buffer_len(&self) -> usize {
         self.buffer.lock().map(|b| b.len()).unwrap_or(0)
+    }
+
+    // ── public generic batch writer ───────────────────────────────────────────
+
+    /// Write a batch of serializable rows to any ClickHouse table as NDJSON.
+    ///
+    /// ```text
+    /// POST /?query=INSERT+INTO+{table}+FORMAT+JSONEachRow
+    /// Content-Type: application/x-ndjson
+    /// <json1>\n<json2>\n...
+    /// ```
+    pub async fn write_batch_table(&self, table: &str, rows: &[impl serde::Serialize]) -> anyhow::Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let body: String = rows.iter()
+            .map(|r| serde_json::to_string(r).unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let resp = self.http
+            .post(format!("{}/", self.url))
+            .query(&[("query", format!("INSERT INTO {table} FORMAT JSONEachRow"))])
+            .header("Content-Type", "application/x-ndjson")
+            .body(body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "ClickHouse HTTP {}: {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            );
+        }
+        Ok(())
     }
 
     // ── private ───────────────────────────────────────────────────────────────
@@ -155,52 +226,14 @@ impl ClickHouseClient {
         }
     }
 
-    /// OPT-4: Batch write — send multiple rows as NDJSON in a single HTTP POST.
+    /// Batch write — send multiple `GdprAuditRow`s as NDJSON in a single HTTP POST.
     async fn write_batch(&self, rows: &[GdprAuditRow]) -> anyhow::Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let body: String = rows.iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
-        self.post_ndjson("gdpr_audit", &body).await
+        self.write_batch_table("gdpr_audit", rows).await
     }
 
-    /// Generic NDJSON batch writer for any table and serializable row type.
-    async fn write_ndjson<T: Serialize>(&self, table: &str, rows: &[T]) -> anyhow::Result<()> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let body: String = rows.iter()
-            .map(|r| serde_json::to_string(r))
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
-        self.post_ndjson(table, &body).await
-    }
-
-    async fn post_ndjson(&self, table: &str, body: &str) -> anyhow::Result<()> {
-        let resp = self.http
-            .post(format!("{}/", self.url))
-            .query(&[("query", format!("INSERT INTO {table} FORMAT JSONEachRow"))])
-            .header("Content-Type", "application/x-ndjson")
-            .body(body.to_string())
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            anyhow::bail!(
-                "ClickHouse HTTP {}: {}",
-                resp.status(),
-                resp.text().await.unwrap_or_default()
-            );
-        }
-        Ok(())
-    }
-
-    /// OPT-4: flush_buffer drains up to BATCH_SIZE rows per write_batch call.
+    /// Drain up to BATCH_SIZE rows from the ring buffer and flush them.
     async fn flush_buffer(&self) {
         loop {
-            // Drain a batch under lock, then write without holding the lock
             let batch: Vec<GdprAuditRow> = {
                 let mut buf = match self.buffer.lock() {
                     Ok(b) => b,
@@ -214,7 +247,6 @@ impl ClickHouseClient {
             if let Err(e) = self.write_batch(&batch).await {
                 tracing::warn!(error = %e, count = batch.len(), "ClickHouse flush failed — re-buffering batch");
                 self.cb.record_failure();
-                // Re-buffer the batch (push_back, may drop oldest if full)
                 for row in batch {
                     self.push_to_buffer(row);
                 }
