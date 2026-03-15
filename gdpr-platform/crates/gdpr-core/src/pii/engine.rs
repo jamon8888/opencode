@@ -28,6 +28,9 @@ pub struct AnonymizeResult {
     pub ner_degraded: bool,
     /// Total number of PII entities detected and replaced.
     pub pii_count: usize,
+    /// Map from pseudo-token (e.g. "PERSON_7") → original value (e.g. "Jean Dupont").
+    /// Populated by `Replacer::pseudonymize`; empty when no PII was found.
+    pub mappings: std::collections::HashMap<String, String>,
 }
 
 /// The PII detection and pseudonymization engine.
@@ -132,6 +135,7 @@ impl PiiEngine {
                 entities: vec![],
                 ner_degraded: *ner_degraded,
                 pii_count: 0,
+                mappings: std::collections::HashMap::new(),
             });
         }
 
@@ -146,6 +150,7 @@ impl PiiEngine {
             entities: pseudonymized.entities,
             ner_degraded: *ner_degraded,
             pii_count,
+            mappings: pseudonymized.mappings,
         })
     }
 
@@ -178,6 +183,7 @@ impl PiiEngine {
                     entities: vec![],
                     ner_degraded: *ner_degraded,
                     pii_count: 0,
+                    mappings: std::collections::HashMap::new(),
                 });
             }
             let pii_count = entities.len();
@@ -187,6 +193,7 @@ impl PiiEngine {
                 entities: pseudonymized.entities,
                 ner_degraded: *ner_degraded,
                 pii_count,
+                mappings: pseudonymized.mappings,
             })
         }).collect()
     }

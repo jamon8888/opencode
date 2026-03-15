@@ -44,14 +44,32 @@ async fn main() -> anyhow::Result<()> {
     // HTTP anonymization proxy (:8080)
     let proxy_addr = std::env::var("PROXY_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+    let session_cache = Arc::new(dashmap::DashMap::new());
+
     let proxy_state = Arc::new(proxy::ProxyState {
         engine_pool:  Arc::clone(&core.engine_pool),
-        http_client:  reqwest::Client::new(),
+        http_client:  reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()?,
         upstream_url: std::env::var("TENSORZERO_URL")
             .unwrap_or_else(|_| "http://localhost:3000/openai/v1".to_string()),
         upstream_key: std::env::var("TENSORZERO_KEY")
             .unwrap_or_else(|_| "hacienda".to_string()),
+        session_cache: Arc::clone(&session_cache),
     });
+
+    // Session GC: evict entries idle for > 30 minutes, every 5 minutes.
+    let sc_gc = Arc::clone(&session_cache);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            sc_gc.retain(|_, v: &mut proxy::SessionCache| {
+                v.created_at.elapsed() < std::time::Duration::from_secs(1800)
+            });
+        }
+    });
+
     let app = Router::new()
         .route("/openai/v1/chat/completions", post(proxy::chat_completions))
         .with_state(proxy_state);

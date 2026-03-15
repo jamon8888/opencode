@@ -58,7 +58,8 @@ async fn main() -> Result<()> {
             Ok::<_, rusqlite::Error>(())
         })
         .await
-        .ok();
+        .map_err(|e| anyhow::anyhow!("DB pool error: {e}"))?
+        .map_err(|e| anyhow::anyhow!("DB init failed: {e}"))?;
     }
 
     let upstream_url = std::env::var("TENSORZERO_URL")
@@ -72,19 +73,29 @@ async fn main() -> Result<()> {
         loop {
             interval.tick().await;
             session_cache_gc.retain(|_, v: &mut state::SessionCache| {
-                v.last_used.elapsed() < Duration::from_secs(1800)
+                v.created_at.elapsed() < Duration::from_secs(1800)
             });
         }
     });
+
+    let vault_path = std::env::var("GDPR_VAULT_PATH")
+        .unwrap_or_else(|_| "gdpr_vault.db".to_string());
+    let model_dir = std::env::var("GLINER_MODEL_DIR")
+        .unwrap_or_else(|_| "models/gliner-pii-edge".to_string());
+    let pool_size: usize = std::env::var("ENGINE_POOL_SIZE")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let pii_engine = gdpr_core::pii::engine::PiiEngine::load_production(&vault_path, &model_dir)?;
+    let engine_pool = Arc::new(gdpr_core::pii::pool::EnginePool::new(pool_size, pii_engine)?);
 
     let state = AppState {
         db: api_pool,
         keys: Arc::new(dashmap::DashMap::new()),
         http: reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
             .build()?,
         upstream_url,
         session_cache,
+        engine_pool,
     };
 
     let app = router::build(state);

@@ -10,6 +10,7 @@ pub struct AppState {
     pub http:          reqwest::Client,
     pub upstream_url:  String,
     pub session_cache: Arc<DashMap<String, SessionCache>>,
+    pub engine_pool:   Arc<gdpr_core::pii::pool::EnginePool>,
 }
 
 #[derive(Clone, Debug)]
@@ -20,8 +21,8 @@ pub struct ApiKeyRecord {
 }
 
 pub struct SessionCache {
-    pub token_map: DashMap<String, String>,
-    pub last_used: Instant,
+    pub token_map:  DashMap<String, String>,
+    pub created_at: Instant,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -26,5 +26,7 @@ reqwest            = { workspace = true }
 futures-util       = { workspace = true }
 tokio-stream       = { workspace = true }
 uuid               = { workspace = true }
+dashmap            = { workspace = true }
+regex              = { workspace = true }
 rusqlite           = { workspace = true }
 cloakpipe-core     = { workspace = true }
