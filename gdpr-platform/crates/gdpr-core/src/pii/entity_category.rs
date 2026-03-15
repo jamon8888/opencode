@@ -72,6 +72,26 @@ impl EntityCategory {
     }
 }
 
+impl EntityCategory {
+    pub fn all_variants() -> Vec<EntityCategory> {
+        vec![
+            EntityCategory::Per, EntityCategory::Org, EntityCategory::OrgForm,
+            EntityCategory::OrgSector, EntityCategory::OrgStruct, EntityCategory::Role,
+            EntityCategory::Judge, EntityCategory::Lawyer,
+            EntityCategory::Addr, EntityCategory::AddrCity, EntityCategory::AddrDept,
+            EntityCategory::AddrCountry,
+            EntityCategory::DateAbs, EntityCategory::DateRel,
+            EntityCategory::Amount, EntityCategory::AmountRange, EntityCategory::Ratio,
+            EntityCategory::IdNat, EntityCategory::IdFin, EntityCategory::IdReg,
+            EntityCategory::IdProp, EntityCategory::IdImmo,
+            EntityCategory::Contact,
+            EntityCategory::JurisRef, EntityCategory::LawRef, EntityCategory::ContractRef,
+            EntityCategory::AssetDesc, EntityCategory::Zone, EntityCategory::Ccn,
+            EntityCategory::FinStruct,
+        ]
+    }
+}
+
 pub fn normalize_label(raw: &str) -> EntityCategory {
     match raw.to_uppercase().as_str() {
         "PERSON" | "PER" | "FULL_NAME" | "FIRST_NAME" | "LAST_NAME" => EntityCategory::Per,

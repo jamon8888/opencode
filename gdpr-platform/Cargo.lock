@@ -1537,6 +1537,7 @@ dependencies = [
  "gline-rs",
  "kreuzberg",
  "num_cpus",
+ "once_cell",
  "parking_lot",
  "prometheus",
  "rayon",

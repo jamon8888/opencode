@@ -29,6 +29,7 @@ dashmap          = { workspace = true }
 parking_lot      = { workspace = true }
 rayon            = { workspace = true }
 regex            = { workspace = true }
+once_cell        = "1"
 tokio-stream     = { workspace = true }
 futures-util     = { workspace = true }
 cloakpipe-core   = { workspace = true }
