@@ -5,6 +5,9 @@ pub mod detection;
 pub mod deduplication;
 pub mod treatment;
 pub mod profile;
+pub mod profile_registry;
+pub mod pseudo_pools;
+pub mod legal_patterns_fr;
 
 pub use engine::{AnonymizeResult, PiiEngine};
 pub use pool::EnginePool;
@@ -13,3 +16,6 @@ pub use detection::{Detection, DetectionLayer};
 pub use deduplication::deduplicate;
 pub use treatment::Treatment;
 pub use profile::AnonProfile;
+pub use profile_registry::{PROFILES, get_treatment};
+pub use pseudo_pools::{PSEUDO_POOLS, get_pool};
+pub use legal_patterns_fr::detect_legal_patterns_fr;
