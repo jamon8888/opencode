@@ -1,18 +1,25 @@
 use super::detection::Detection;
 
 pub fn deduplicate(mut detections: Vec<Detection>) -> Vec<Detection> {
-    // Sort: (start asc, length desc) — longest span first within same start position
-    detections.sort_by_key(|d| (d.start, usize::MAX - (d.end - d.start)));
-    let mut result: Vec<Detection> = Vec::new();
+    // Sort by span length descending so longest spans are processed first (longest-span-wins).
+    // Use start ascending as tiebreaker for deterministic output.
+    detections.sort_by(|a, b| {
+        let len_a = a.end.saturating_sub(a.start);
+        let len_b = b.end.saturating_sub(b.start);
+        len_b.cmp(&len_a).then(a.start.cmp(&b.start))
+    });
+
+    let mut kept: Vec<Detection> = Vec::new();
     for det in detections {
-        let overlaps = result.iter().any(|kept| {
-            det.start < kept.end && det.end > kept.start
-        });
+        let overlaps = kept.iter().any(|k| det.start < k.end && det.end > k.start);
         if !overlaps {
-            result.push(det);
+            kept.push(det);
         }
     }
-    result
+
+    // Re-sort kept spans by start position for stable output order.
+    kept.sort_by_key(|d| d.start);
+    kept
 }
 
 #[cfg(test)]
@@ -69,5 +76,18 @@ mod tests {
     fn empty_input_empty_output() {
         let result = deduplicate(vec![]);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_longer_span_wins_when_shorter_has_lower_start() {
+        // (0,3) is shorter, (1,10) is longer — longer must win even though shorter starts earlier
+        let detections = vec![
+            make_det(0, 3),
+            make_det(1, 10),
+        ];
+        let result = deduplicate(detections);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start, 1);
+        assert_eq!(result[0].end, 10);
     }
 }
