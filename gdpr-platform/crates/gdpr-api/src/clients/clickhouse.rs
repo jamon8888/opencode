@@ -1,7 +1,7 @@
 //! ClickHouse GDPR Art. 30 audit trail client.
 //!
 //! Design:
-//! - INSERT via HTTP `POST /?query=INSERT INTO gdpr_audit FORMAT JSONEachRow` + JSON body.
+//! - INSERT via HTTP `POST ?query=INSERT%20INTO%20gdpr.gdpr_audit%20FORMAT%20JSONEachRow` + JSON body.
 //! - Circuit breaker: opens after 10 consecutive failures within 10 s; resets on success.
 //! - Ring buffer: when CB open, rows are buffered (up to 10 000, oldest dropped on overflow).
 //!   On successful write, buffered rows are flushed in a single batch INSERT.
@@ -138,13 +138,14 @@ impl ClickHouseClient {
             Ok(()) => tracing::info!(count = rows.len(), "ClickHouse buffer flushed"),
             Err(e) => {
                 tracing::warn!(error = %e, count = rows.len(), "ClickHouse buffer flush failed — re-buffering");
-                // Re-buffer on failure (they stay lost if buffer is full)
+                self.record_failure();
                 if let Ok(mut buf) = self.buffer.lock() {
-                    for row in rows {
+                    // Re-insert in reverse order at the front so oldest rows are evicted last
+                    for row in rows.into_iter().rev() {
                         if buf.len() >= RING_BUFFER_CAP {
-                            buf.pop_front();
+                            buf.pop_back(); // drop newest to protect re-buffered old events
                         }
-                        buf.push_back(row);
+                        buf.push_front(row);
                     }
                 }
             }
@@ -161,21 +162,21 @@ impl ClickHouseClient {
             .join("\n");
 
         let url = format!(
-            "{}/{}",
-            self.base_url.trim_end_matches('/'),
-            "?query=INSERT%20INTO%20gdpr.gdpr_audit%20FORMAT%20JSONEachRow"
+            "{}?query=INSERT%20INTO%20gdpr.gdpr_audit%20FORMAT%20JSONEachRow",
+            self.base_url.trim_end_matches('/')
         );
 
         let resp = self.http
             .post(&url)
-            .header("Content-Type", "application/x-ndjson")
+            .header("Content-Type", "text/plain; charset=utf-8")
             .body(body)
             .send()
             .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body   = resp.text().await.unwrap_or_default();
+            let raw    = resp.text().await.unwrap_or_default();
+            let body   = raw.chars().take(200).collect::<String>();
             anyhow::bail!("ClickHouse INSERT failed: {} — {}", status, body);
         }
         Ok(())
