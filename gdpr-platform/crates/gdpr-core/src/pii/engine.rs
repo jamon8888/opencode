@@ -1,0 +1,236 @@
+//! PII detection and pseudonymization engine.
+//!
+//! Uses cloakpipe-core for L1 pattern detection and optional L2 NER.
+//! Provides consistent pseudonymization via an AES-256-GCM vault.
+
+use cloakpipe_core::{
+    config::DetectionConfig,
+    detector::Detector,
+    replacer::Replacer,
+    rehydrator::Rehydrator,
+    vault::Vault,
+    DetectedEntity,
+};
+use std::sync::Arc;
+// OPT-1: Use parking_lot::RwLock instead of std::sync::Mutex for vault
+use parking_lot::RwLock;
+
+use crate::ner::GlinerNer;
+
+/// Result of anonymizing a piece of text.
+#[derive(Debug, Clone)]
+pub struct AnonymizeResult {
+    /// The text with all PII replaced by pseudo-tokens.
+    pub text: String,
+    /// All entities that were detected and replaced.
+    pub entities: Vec<DetectedEntity>,
+    /// Whether NER (L2) was unavailable and fell back to L1 only.
+    pub ner_degraded: bool,
+    /// Total number of PII entities detected and replaced.
+    pub pii_count: usize,
+}
+
+/// The PII detection and pseudonymization engine.
+pub struct PiiEngine {
+    /// L1 pattern detector (regex + financial). Always runs.
+    detector: Detector,
+    /// Shared vault for consistent pseudonymization across calls.
+    /// OPT-1: RwLock allows concurrent reads (rehydrate) while writes (anonymize) are exclusive.
+    vault: Arc<RwLock<Vault>>,
+    /// Whether L2/NER is configured. False = L1 only (degraded mode).
+    has_ner: bool,
+    /// Optional L2 NER model (GLiNER). Shared across EnginePool slots via Arc.
+    gliner: Option<Arc<GlinerNer>>,
+}
+
+impl PiiEngine {
+    /// Create an engine suitable for unit tests.
+    ///
+    /// Uses L1 pattern detection only (no NER model required).
+    /// Reads the vault key from the `CLOAKPIPE_VAULT_KEY` env var,
+    /// padding or truncating to exactly 32 bytes. Falls back to a
+    /// zero-filled key if the env var is not set.
+    pub fn load_for_test(vault_path: &str) -> anyhow::Result<Self> {
+        let config = Self::default_detection_config()?;
+        let detector = Detector::from_config(&config)?;
+
+        let key = Self::key_from_env();
+        let vault = Vault::open(vault_path, key)?;
+
+        Ok(Self {
+            detector,
+            vault: Arc::new(RwLock::new(vault)),
+            has_ner: false,
+            gliner: None,
+        })
+    }
+
+    /// Create an engine from explicit configuration.
+    pub fn new(config: &DetectionConfig, vault: Vault, has_ner: bool) -> anyhow::Result<Self> {
+        let detector = Detector::from_config(config)?;
+        Ok(Self {
+            detector,
+            vault: Arc::new(RwLock::new(vault)),
+            has_ner,
+            gliner: None,
+        })
+    }
+
+    /// Production constructor: loads GLiNER from `model_dir` if present, degrades to L1 otherwise.
+    pub fn load_production(vault_path: &str, model_dir: &str) -> anyhow::Result<Self> {
+        let config   = Self::default_detection_config()?;
+        let detector = Detector::from_config(&config)?;
+        let key      = Self::key_from_env();
+        let vault    = Vault::open(vault_path, key)?;
+        let gliner   = GlinerNer::load(model_dir)?;
+        Ok(Self {
+            detector,
+            vault:   Arc::new(RwLock::new(vault)),
+            has_ner: gliner.is_some(),
+            gliner:  gliner.map(Arc::new),
+        })
+    }
+
+    /// Cheap clone for EnginePool slot construction.
+    ///
+    /// Each slot gets a fresh `Detector` (stateless, cheap to create).
+    /// `Vault` and `GlinerNer` are `Arc::clone` — pseudonym consistency and one ONNX session.
+    pub fn try_clone(&self) -> anyhow::Result<Self> {
+        let config   = Self::default_detection_config()?;
+        let detector = Detector::from_config(&config)?;
+        Ok(Self {
+            detector,
+            vault:   Arc::clone(&self.vault),
+            has_ner: self.has_ner,
+            gliner:  self.gliner.clone(),
+        })
+    }
+
+    /// Anonymize text, replacing all detected PII with pseudo-tokens.
+    ///
+    /// If no PII is detected the original text is returned unchanged
+    /// (guarantees `test_clean_text_passes_through_unchanged`).
+    ///
+    /// `ner_degraded` is set to `true` when this engine has no L2 NER
+    /// (i.e., was built with `load_for_test`). Callers may expose this
+    /// flag in responses so clients know detection may be less precise.
+    pub fn anonymize(
+        &mut self,
+        text: &str,
+        ner_degraded: &mut bool,
+    ) -> anyhow::Result<AnonymizeResult> {
+        // L1 detection (patterns + financial)
+        let entities = self.detector.detect(text)?;
+
+        // ner_degraded = true only when L2/NER is NOT configured.
+        *ner_degraded = !self.has_ner;
+
+        if entities.is_empty() {
+            // Fast-path: return original text unchanged
+            return Ok(AnonymizeResult {
+                text: text.to_string(),
+                entities: vec![],
+                ner_degraded: *ner_degraded,
+                pii_count: 0,
+            });
+        }
+
+        let pii_count = entities.len();
+
+        // OPT-1: write lock for anonymize (pseudonymization mutates vault)
+        let mut vault = self.vault.write();
+        let pseudonymized = Replacer::pseudonymize(text, &entities, &mut vault)?;
+
+        Ok(AnonymizeResult {
+            text: pseudonymized.text,
+            entities: pseudonymized.entities,
+            ner_degraded: *ner_degraded,
+            pii_count,
+        })
+    }
+
+    /// Batch anonymization — L1 per-text then optional L2 (stub: always None for now).
+    ///
+    /// Invariant I1: L1 failure returns `Err` (fatal — never pass raw text through).
+    /// Invariant I2: L2 absent sets `ner_degraded = true`, continues with L1 only.
+    ///
+    /// OPT-5: parallel detect via rayon, then serial pseudonymize (vault write is serial).
+    pub fn anonymize_batch(
+        &mut self,
+        texts: &[&str],
+        ner_degraded: &mut bool,
+    ) -> anyhow::Result<Vec<AnonymizeResult>> {
+        *ner_degraded = !self.has_ner;
+        // OPT-5: use rayon for parallel L1 detection across texts
+        use rayon::prelude::*;
+        let detected: anyhow::Result<Vec<_>> = texts
+            .par_iter()
+            .map(|t| self.detector.detect(t))
+            .collect();
+        let detected = detected?;
+
+        // Serial pseudonymize (vault write must be exclusive)
+        let mut vault = self.vault.write();
+        texts.iter().zip(detected).map(|(t, entities)| {
+            if entities.is_empty() {
+                return Ok(AnonymizeResult {
+                    text: t.to_string(),
+                    entities: vec![],
+                    ner_degraded: *ner_degraded,
+                    pii_count: 0,
+                });
+            }
+            let pii_count = entities.len();
+            let pseudonymized = Replacer::pseudonymize(t, &entities, &mut vault)?;
+            Ok(AnonymizeResult {
+                text: pseudonymized.text,
+                entities: pseudonymized.entities,
+                ner_degraded: *ner_degraded,
+                pii_count,
+            })
+        }).collect()
+    }
+
+    /// Rehydrate a text that was previously anonymized, restoring original values.
+    pub fn rehydrate(&self, text: &str) -> anyhow::Result<String> {
+        // OPT-1: read lock for rehydrate (read-only on vault)
+        let vault = self.vault.read();
+        let result = Rehydrator::rehydrate(text, &vault)?;
+        Ok(result.text)
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    /// Build a `DetectionConfig` with sensible defaults via serde.
+    fn default_detection_config() -> anyhow::Result<DetectionConfig> {
+        let json = r#"{
+            "secrets": true,
+            "financial": true,
+            "dates": true,
+            "emails": true,
+            "phone_numbers": true,
+            "ip_addresses": false,
+            "urls_internal": false,
+            "custom": {
+                "patterns": [
+                    {
+                        "name": "iban",
+                        "regex": "[A-Z]{2}\\d{2}(?:\\s?[A-Z0-9]{4}){4,7}(?:\\s?[A-Z0-9]{1,4})?",
+                        "category": "IBAN"
+                    }
+                ]
+            }
+        }"#;
+        let config: DetectionConfig = serde_json::from_str(json)?;
+        Ok(config)
+    }
+
+    /// Derive a 32-byte AES-256 key from the `CLOAKPIPE_VAULT_KEY` env var.
+    /// Pads with zeros or truncates to exactly 32 bytes.
+    fn key_from_env() -> Vec<u8> {
+        let raw = std::env::var("CLOAKPIPE_VAULT_KEY").unwrap_or_default();
+        let mut key = raw.into_bytes();
+        key.resize(32, 0u8);
+        key
+    }
+}

@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["crates/gdpr-core", "crates/gdpr-api", "crates/gdpr-billing", "crates/gdpr-mcp"]
+default-members = ["crates/gdpr-api", "crates/gdpr-mcp"]
+
+[workspace.dependencies]
+tokio            = { version = "1", features = ["full"] }
+serde            = { version = "1", features = ["derive"] }
+serde_json       = "1"
+anyhow           = "1"
+thiserror        = "2"
+uuid             = { version = "1", features = ["v4"] }
+tracing          = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+reqwest          = { version = "0.12", features = ["json", "stream"] }
+axum             = "0.8"
+tower            = "0.5"
+tower-http       = { version = "0.6", features = ["full"] }
+hyper            = { version = "1", features = ["full"] }
+hyper-util       = { version = "0.1", features = ["tokio"] }
+rusqlite         = { version = "0.32", features = ["bundled"] }
+deadpool-sqlite  = "0.9"
+prometheus       = { version = "0.13", features = ["process"] }
+kreuzberg        = { version = "4", features = ["pdf", "office", "tokio-runtime"] }
+unicode-segmentation = "1"
+num_cpus         = "1"
+rmcp             = { version = "0.1", features = ["server", "macros", "transport-io"] }
+schemars         = "0.8"
+chrono           = { version = "0.4", features = ["serde"] }
+dashmap          = "6"
+parking_lot      = "0.12"
+rayon            = "1"
+regex            = "1"
+tokio-stream     = { version = "0.1", features = ["sync"] }
+futures-util     = "0.3"
+cloakpipe-core   = { git = "https://github.com/rohansx/cloakpipe", package = "cloakpipe-core", rev = "55a6b06c33578cee6d3b456ffbb8dd73e10750c4" }
+gline-rs         = "1"
+
+[profile.dev]
+debug = 1
+[profile.test]
+debug = 1
+[profile.release]
+lto = "thin"

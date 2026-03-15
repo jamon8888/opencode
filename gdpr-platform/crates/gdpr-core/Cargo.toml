@@ -1,0 +1,35 @@
+[package]
+name    = "gdpr-core"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+ner = []
+ocr = ["kreuzberg/ocr"]
+
+[dependencies]
+tokio            = { workspace = true }
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+anyhow           = { workspace = true }
+thiserror        = { workspace = true }
+uuid             = { workspace = true }
+tracing          = { workspace = true }
+reqwest          = { workspace = true }
+rusqlite         = { workspace = true }
+deadpool-sqlite  = { workspace = true }
+
+prometheus       = { workspace = true }
+kreuzberg        = { workspace = true, optional = true }
+unicode-segmentation = { workspace = true }
+num_cpus         = { workspace = true }
+schemars         = { workspace = true }
+chrono           = { workspace = true }
+dashmap          = { workspace = true }
+parking_lot      = { workspace = true }
+rayon            = { workspace = true }
+regex            = { workspace = true }
+tokio-stream     = { workspace = true }
+futures-util     = { workspace = true }
+cloakpipe-core   = { workspace = true }
+gline-rs         = { workspace = true }
