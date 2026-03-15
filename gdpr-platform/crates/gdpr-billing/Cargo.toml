@@ -2,5 +2,18 @@
 name    = "gdpr-billing"
 version = "0.1.0"
 edition = "2021"
+
+[features]
+stripe = []
+
 [dependencies]
-gdpr-core = { path = "../gdpr-core" }
+gdpr-core   = { path = "../gdpr-core" }
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+anyhow      = { workspace = true }
+thiserror   = { workspace = true }
+reqwest     = { workspace = true }
+chrono      = { workspace = true }
+dashmap     = { workspace = true }
+tracing     = { workspace = true }

@@ -2,5 +2,36 @@
 name    = "gdpr-api"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "gdpr-api"
+path = "src/main.rs"
+
+[features]
+ner     = ["gdpr-core/ner"]
+ocr     = ["gdpr-core/ocr"]
+
 [dependencies]
-gdpr-core = { path = "../gdpr-core" }
+gdpr-core          = { path = "../gdpr-core" }
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+anyhow             = { workspace = true }
+thiserror          = { workspace = true }
+uuid               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+axum               = { workspace = true }
+tower              = { workspace = true }
+tower-http         = { workspace = true }
+reqwest            = { workspace = true }
+deadpool-sqlite    = { workspace = true }
+dashmap            = { workspace = true }
+chrono             = { workspace = true }
+regex              = { workspace = true }
+futures-util       = { workspace = true }
+tokio-stream       = { workspace = true }
+rusqlite           = { workspace = true }
+axum-extra         = { version = "0.10", features = ["typed-header"] }
+argon2             = "0.5"
+rand               = "0.8"
