@@ -33,5 +33,8 @@ futures-util       = { workspace = true }
 tokio-stream       = { workspace = true }
 rusqlite           = { workspace = true }
 axum-extra         = { version = "0.10", features = ["typed-header"] }
+axum-server        = { version = "0.7", features = ["tls-rustls"] }
+rustls             = "0.23"
+rustls-pemfile     = "2"
 argon2             = "0.5"
 rand               = "0.8"

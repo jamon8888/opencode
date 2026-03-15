@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
         conn.interact(|c| {
             c.execute_batch(
                 "
+                PRAGMA busy_timeout=5000;
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS api_keys (
                     id          TEXT PRIMARY KEY,
@@ -60,6 +61,14 @@ async fn main() -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("DB pool error: {e}"))?
         .map_err(|e| anyhow::anyhow!("DB init failed: {e}"))?;
+    }
+    {
+        let conn2 = api_pool.get().await?;
+        let _ = conn2.interact(|c| {
+            // Idempotent: ignore error if column already exists
+            let _ = c.execute("ALTER TABLE api_keys ADD COLUMN rotated_at INTEGER", []);
+            Ok::<_, rusqlite::Error>(())
+        }).await;
     }
 
     let upstream_url = std::env::var("TENSORZERO_URL")
@@ -98,11 +107,49 @@ async fn main() -> Result<()> {
         engine_pool,
     };
 
-    let app = router::build(state);
-    let addr =
-        std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3001".to_string());
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("gdpr-api listening on {addr}");
-    axum::serve(listener, app).await?;
+    let app  = router::build(state);
+    let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8443".to_string());
+
+    let cert_path = std::env::var("TLS_CERT_PATH").ok();
+    let key_path  = std::env::var("TLS_KEY_PATH").ok();
+
+    match (cert_path, key_path) {
+        (Some(cert), Some(key)) => {
+            use axum_server::tls_rustls::RustlsConfig;
+
+            let cert_bytes = tokio::fs::read(&cert).await?;
+            let key_bytes  = tokio::fs::read(&key).await?;
+
+            let cert_chain: Vec<rustls::pki_types::CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut cert_bytes.as_slice())
+                    .collect::<Result<Vec<_>, _>>()?;
+            if cert_chain.is_empty() {
+                anyhow::bail!("TLS_CERT_PATH '{}': PEM file contains no certificate blocks", cert);
+            }
+            let private_key =
+                rustls_pemfile::private_key(&mut key_bytes.as_slice())?
+                    .ok_or_else(|| anyhow::anyhow!("TLS_KEY_PATH: no private key found"))?;
+
+            let mut tls_cfg = rustls::ServerConfig::builder_with_protocol_versions(
+                    &[&rustls::version::TLS13],
+                )
+                .with_no_client_auth()
+                .with_single_cert(cert_chain, private_key)
+                .map_err(|_| anyhow::anyhow!("TLS certificate/key pair is invalid — check TLS_CERT_PATH and TLS_KEY_PATH"))?;
+
+            tls_cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+            let rustls_config = RustlsConfig::from_config(std::sync::Arc::new(tls_cfg));
+            tracing::info!(%addr, "gdpr-api listening (TLS 1.3)");
+            axum_server::bind_rustls(addr.parse()?, rustls_config)
+                .serve(app.into_make_service())
+                .await?;
+        }
+        _ => {
+            tracing::warn!(%addr, "gdpr-api listening (plain HTTP — set TLS_CERT_PATH + TLS_KEY_PATH for production)");
+            let listener = tokio::net::TcpListener::bind(&addr).await?;
+            axum::serve(listener, app).await?;
+        }
+    }
     Ok(())
 }

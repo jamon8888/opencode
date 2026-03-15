@@ -1,1 +1,1 @@
-// Middleware stubs — full implementation in later phases
+pub mod rate_limit;

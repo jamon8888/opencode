@@ -5,10 +5,12 @@ use tower_http::{
     timeout::TimeoutLayer,
     limit::RequestBodyLimitLayer,
     trace::TraceLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
 };
 use std::time::Duration;
 use crate::state::AppState;
 use crate::handlers;
+use crate::middleware::rate_limit::RateLimitJitterLayer;
 
 pub fn build(state: AppState) -> Router {
     Router::new()
@@ -37,15 +39,19 @@ pub fn build(state: AppState) -> Router {
         // Usage
         .route("/v1/usage", get(handlers::usage::get_usage))
         // Keys
-        .route("/v1/keys",     post(handlers::keys::post_key))
-        .route("/v1/keys/:id", delete(handlers::keys::delete_key))
+        .route("/v1/keys",             post(handlers::keys::post_key))
+        .route("/v1/keys/:id",         delete(handlers::keys::delete_key))
+        .route("/v1/keys/:id/rotate",  post(handlers::keys::rotate_key))
         // Session
         .route("/v1/session/:id/table", get(handlers::session::get_session_table))
         .route("/v1/session/:id",       delete(handlers::session::delete_session))
         .with_state(state)
         .layer(CompressionLayer::new())
+        .layer(RateLimitJitterLayer)
         .layer(TimeoutLayer::with_status_code(axum::http::StatusCode::REQUEST_TIMEOUT, Duration::from_secs(30)))
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
 }
