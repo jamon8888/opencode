@@ -38,12 +38,14 @@ impl EnginePool {
     /// OPT-2: Uses round-robin counter to pick the starting slot, then tries
     /// remaining slots with `try_lock`. Falls back to blocking lock on start slot.
     ///
+    /// C7 fix: `ner_degraded` is per-element (`Vec<bool>`).
+    ///
     /// On L1 detection failure (Invariant I1): returns error sentinel strings
     /// rather than passing raw content through.
     pub fn anonymize_batch(
         &self,
         texts: &[&str],
-        ner_degraded: &mut bool,
+        ner_degraded: &mut Vec<bool>,
     ) -> anyhow::Result<Vec<AnonymizeResult>> {
         let n     = self.slots.len();
         let start = self.counter.fetch_add(1, Ordering::Relaxed) % n;
@@ -63,7 +65,7 @@ impl EnginePool {
     /// On L1 detection failure (Invariant I1): returns `"[PII_DETECTION_ERROR: content blocked]"`
     /// for every affected text rather than passing raw content through.
     pub fn anonymize_batch_strings(&self, texts: &[&str]) -> Vec<String> {
-        let mut ner_degraded = false;
+        let mut ner_degraded = vec![false; texts.len()];
         match self.anonymize_batch(texts, &mut ner_degraded) {
             Ok(results) => results.into_iter().map(|r| r.text).collect(),
             Err(e) => {

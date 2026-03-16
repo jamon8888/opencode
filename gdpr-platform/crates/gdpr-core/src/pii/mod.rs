@@ -8,6 +8,7 @@ pub mod profile;
 pub mod profile_registry;
 pub mod pseudo_pools;
 pub mod legal_patterns_fr;
+pub mod treatment_engine;
 
 pub use engine::{AnonymizeResult, PiiEngine};
 pub use pool::EnginePool;
@@ -19,3 +20,4 @@ pub use profile::AnonProfile;
 pub use profile_registry::{PROFILES, get_treatment};
 pub use pseudo_pools::{PSEUDO_POOLS, get_pool};
 pub use legal_patterns_fr::detect_legal_patterns_fr;
+pub use treatment_engine::{TreatmentEngine, SessionContext, ProfileAnonymizeResult, anonymize_with_profile};

@@ -176,14 +176,14 @@ impl GdprServer {
         let pool_arc = Arc::clone(&self.state.engine_pool);
         let raw_clone = raw.clone();
         let anonymize_result = tokio::task::spawn_blocking(move || {
-            let mut ner_degraded = false;
+            let mut ner_degraded = vec![false];
             let results = pool_arc.anonymize_batch(
                 &[raw_clone.as_str()],
                 &mut ner_degraded,
             )?;
             let result = results.into_iter().next()
                 .ok_or_else(|| anyhow::anyhow!("empty batch result"))?;
-            Ok::<_, anyhow::Error>((result, ner_degraded))
+            Ok::<_, anyhow::Error>((result, ner_degraded.first().copied().unwrap_or(false)))
         })
         .await
         .map_err(|e| anyhow::anyhow!("spawn_blocking panic: {e}"));

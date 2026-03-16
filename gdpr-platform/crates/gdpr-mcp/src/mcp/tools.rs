@@ -22,13 +22,13 @@ pub struct AnonymizeTextResult {
 pub async fn anonymize_text(state: &CoreState, text: String) -> Result<AnonymizeTextResult> {
     let pool_arc = std::sync::Arc::clone(&state.engine_pool);
     let (anonymized, pii_count, ner_degraded) = tokio::task::spawn_blocking(move || {
-        let mut ner_degraded = false;
+        let mut ner_degraded = vec![false];
         let results = pool_arc
             .anonymize_batch(&[text.as_str()], &mut ner_degraded)
             .map_err(|e| GdprError::PiiDetection(e))?;
         let r = results.into_iter().next()
             .ok_or_else(|| GdprError::Storage("empty batch result".into()))?;
-        Ok::<_, GdprError>((r.text, r.pii_count, ner_degraded))
+        Ok::<_, GdprError>((r.text, r.pii_count, ner_degraded.first().copied().unwrap_or(false)))
     })
     .await
     .map_err(|e| GdprError::Storage(format!("spawn_blocking panic: {e}")))?
@@ -79,13 +79,13 @@ pub async fn ingest_document(
     // 2. Anonymize via EnginePool
     let pool_arc = std::sync::Arc::clone(&state.engine_pool);
     let (result, ner_degraded) = tokio::task::spawn_blocking(move || {
-        let mut nd = false;
+        let mut nd = vec![false];
         let mut results = pool_arc
             .anonymize_batch(&[raw.as_str()], &mut nd)
             .map_err(|e| GdprError::PiiDetection(e))?;
         let r = results.into_iter().next()
             .ok_or_else(|| GdprError::Storage("empty batch result".into()))?;
-        Ok::<_, GdprError>((r, nd))
+        Ok::<_, GdprError>((r, nd.first().copied().unwrap_or(false)))
     })
     .await
     .map_err(|e| GdprError::Storage(format!("spawn_blocking panic: {e}")))?

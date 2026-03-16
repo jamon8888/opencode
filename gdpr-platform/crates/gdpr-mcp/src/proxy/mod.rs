@@ -208,7 +208,7 @@ pub async fn chat_completions(
         // extract per-entity token→original mappings for session rehydration.
         let batch_result: Result<Vec<gdpr_core::pii::AnonymizeResult>, _> =
             tokio::task::spawn_blocking(move || {
-                let mut _ner_degraded = false;
+                let mut _ner_degraded = vec![false; cloned.len()];
                 pool.anonymize_batch(
                     &cloned.iter().map(String::as_str).collect::<Vec<_>>(),
                     &mut _ner_degraded,
