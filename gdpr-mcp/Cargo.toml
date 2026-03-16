@@ -13,6 +13,9 @@ uuid              = { version = "1", features = ["v4"] }
 
 cloakpipe-core    = { git = "https://github.com/rohansx/cloakpipe", package = "cloakpipe-core", rev = "55a6b06c33578cee6d3b456ffbb8dd73e10750c4" }
 kreuzberg         = { version = "4", features = ["pdf", "office", "tokio-runtime"] }
+# The "ocr" kreuzberg feature is gated behind the `ocr` Cargo feature (requires cmake + Tesseract).
+# On Windows native: cargo build --release --features ner
+# In Docker (Linux): cargo build --release --features ner,ocr
 
 # cloakpipe-core requires rusqlite ^0.32
 rusqlite          = { version = "0.32", features = ["bundled"] }
@@ -50,6 +53,8 @@ debug = 1
 # Gate L2: build without --features ner avoids linking ONNX Runtime.
 # The binary degrades gracefully to L1-only when model absent.
 ner = []
+# Gate Tesseract OCR: requires cmake + Tesseract installed (available in Docker, not on Windows native).
+ocr = ["kreuzberg/ocr"]
 
 # Public library items appear unused from the binary's reachability perspective.
 # Suppress the spurious dead_code / unused_imports lints globally.

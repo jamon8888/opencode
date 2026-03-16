@@ -8,9 +8,11 @@ fn test_row() -> GdprAuditRow {
         pii_count_after:    0,
         ner_degraded:       false,
         processing_time_ms: 12,
-        legal_basis:        "contract".into(),
-        user_id:            "u1".into(),
-        model_version:      "gliner-pii-edge-v1.0".into(),
+        legal_basis:          "contract".into(),
+        user_id:              "u1".into(),
+        model_version:        "gliner-pii-edge-v1.0".into(),
+        ai_act_risk_level:    "medium".into(),
+        decision_explanation: "Detected 5×email".into(),
     }
 }
 

@@ -44,6 +44,11 @@ async fn main() -> anyhow::Result<()> {
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
     let state = Arc::new(AppState::new(pii_engine, db)?);
+
+    if state.vec_store.is_some() {
+        tracing::info!("VecStore enabled — semantic search active via Ollama embeddings");
+    }
+
     let server = GdprServer::new(Arc::clone(&state));
 
     // ── HTTP anonymization proxy (:8080) ──────────────────────────────────────

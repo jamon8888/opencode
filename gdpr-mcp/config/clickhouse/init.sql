@@ -1,3 +1,6 @@
+-- TensorZero inference logging database (auto-migrated by TensorZero on startup)
+CREATE DATABASE IF NOT EXISTS tensorzero;
+
 -- GDPR Art. 30 immutable audit trail
 -- Engine: ReplacingMergeTree ensures idempotent inserts; ORDER BY (document_id, ts_unix) for efficient range queries.
 
@@ -11,6 +14,8 @@ CREATE TABLE IF NOT EXISTS gdpr_audit (
     legal_basis        String,           -- GDPR Art. 6 basis
     user_id            String,
     model_version      String,
+    ai_act_risk_level  String DEFAULT 'low',  -- AI Act Art. 9: low | medium | high | critical
+    decision_explanation String DEFAULT '',   -- AI Act Art. 13 transparency
     ts_unix            UInt64 DEFAULT toUnixTimestamp(now())
 )
 ENGINE = ReplacingMergeTree()

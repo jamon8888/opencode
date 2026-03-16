@@ -205,9 +205,10 @@ pub async fn delete_document(
 #[derive(Serialize)]
 pub struct SearchHit {
     pub document_id: String,
-    pub snippet: String,
-    pub pii_count: i64,
-    pub created_at: i64,
+    pub chunk_text:  String,
+    pub chunk_idx:   Option<usize>,
+    pub pii_count:   i64,
+    pub created_at:  i64,
 }
 
 #[derive(Serialize)]
@@ -231,30 +232,68 @@ pub async fn search_documents(
     let pattern = format!("%{escaped}%");
 
     let db = state.db.lock().map_err(|_| GdprError::Storage("db lock".into()))?;
+
+    // Primary: search chunk-level text
     let mut stmt = db
+        .prepare(
+            "SELECT dc.doc_id, dc.chunk_text, dc.chunk_idx, d.pii_count, d.created_at
+             FROM doc_chunks dc
+             JOIN documents d ON dc.doc_id = d.id
+             WHERE dc.chunk_text LIKE ?1 ESCAPE '\\' LIMIT ?2",
+        )
+        .map_err(|e| GdprError::Storage(e.to_string()))?;
+
+    let hits: Vec<SearchHit> = stmt
+        .query_map(rusqlite::params![pattern, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })
+        .map_err(|e| GdprError::Storage(e.to_string()))?
+        .filter_map(|r| r.ok())
+        .map(|(document_id, chunk_text, chunk_idx, pii_count, created_at)| SearchHit {
+            document_id,
+            chunk_text,
+            chunk_idx: Some(chunk_idx as usize),
+            pii_count,
+            created_at,
+        })
+        .collect();
+
+    // Backward compat: if no chunks found, fall back to whole-document LIKE search
+    if !hits.is_empty() {
+        return Ok(SearchDocumentsResult { hits });
+    }
+
+    let mut stmt2 = db
         .prepare(
             "SELECT id, anon_text, pii_count, created_at
              FROM documents WHERE anon_text LIKE ?1 ESCAPE '\\' LIMIT ?2",
         )
         .map_err(|e| GdprError::Storage(e.to_string()))?;
 
-    let hits = stmt
+    let fallback_hits = stmt2
         .query_map(rusqlite::params![pattern, limit], |row| {
-            let doc_id: String = row.get(0)?;
-            let text: String = row.get(1)?;
-            let pii_count: i64 = row.get(2)?;
-            let created_at: i64 = row.get(3)?;
-            Ok((doc_id, text, pii_count, created_at))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })
         .map_err(|e| GdprError::Storage(e.to_string()))?
         .filter_map(|r| r.ok())
         .map(|(document_id, text, pii_count, created_at)| {
-            let snippet = extract_snippet(&text, &query, 50);
-            SearchHit { document_id, snippet, pii_count, created_at }
+            let chunk_text = extract_snippet(&text, &query, 50);
+            SearchHit { document_id, chunk_text, chunk_idx: None, pii_count, created_at }
         })
         .collect();
 
-    Ok(SearchDocumentsResult { hits })
+    Ok(SearchDocumentsResult { hits: fallback_hits })
 }
 
 // ── audit_report ──────────────────────────────────────────────────────────────

@@ -5,7 +5,7 @@ use rusqlite::Connection;
 
 use crate::{
     audit::DocAuditDb,
-    clients::clickhouse::ClickHouseClient,
+    clients::{clickhouse::ClickHouseClient, vec_store::VecStore},
     pii::{EnginePool, PiiEngine},
     resilience::CircuitBreaker,
 };
@@ -22,6 +22,8 @@ pub struct AppState {
     pub engine_pool: Arc<EnginePool>,
     /// ClickHouse audit trail client (GDPR Art. 30). None if CLICKHOUSE_URL unset.
     pub clickhouse: Option<Arc<ClickHouseClient>>,
+    /// SQLite-backed in-process vector store. None if EMBEDDING_URL unset.
+    pub vec_store: Option<Arc<VecStore>>,
 }
 
 impl AppState {
@@ -39,6 +41,8 @@ impl AppState {
             ClickHouseClient::new(&url)
         });
 
+        let vec_store = VecStore::from_env(Arc::clone(&db_arc));
+
         Ok(Self {
             pii_engine: Arc::new(Mutex::new(pii_engine)),
             doc_audit: DocAuditDb::from_shared(Arc::clone(&db_arc)),
@@ -46,6 +50,7 @@ impl AppState {
             kreuzberg_cb: CircuitBreaker::new("kreuzberg", 5, Duration::from_secs(30)),
             engine_pool,
             clickhouse,
+            vec_store,
         })
     }
 }
@@ -80,7 +85,18 @@ fn init_schema(db: &Connection) -> anyhow::Result<()> {
             ner_degraded    INTEGER NOT NULL DEFAULT 0,
             created_at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
         );
-        CREATE INDEX IF NOT EXISTS idx_dem_doc_id ON doc_entity_map(document_id);",
+        CREATE INDEX IF NOT EXISTS idx_dem_doc_id ON doc_entity_map(document_id);
+
+        CREATE TABLE IF NOT EXISTS doc_chunks (
+            id           TEXT PRIMARY KEY,
+            doc_id       TEXT NOT NULL,
+            chunk_idx    INTEGER NOT NULL,
+            chunk_text   TEXT NOT NULL,
+            chunk_offset INTEGER NOT NULL,
+            created_at   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_dc_doc_id ON doc_chunks(doc_id);",
     )?;
+    VecStore::init_schema(db)?;
     Ok(())
 }

@@ -159,8 +159,13 @@ pub async fn chat_completions(
         Ok(resp) => {
             let status  = StatusCode::from_u16(resp.status().as_u16())
                 .unwrap_or(StatusCode::BAD_GATEWAY);
+
+            // Copy headers, dropping Content-Length (body size may change after rehydration).
             let mut headers = HeaderMap::new();
             for (k, v) in resp.headers() {
+                if k.as_str().eq_ignore_ascii_case("content-length") {
+                    continue; // will be wrong after rehydration
+                }
                 if let (Ok(n), Ok(val)) = (
                     HeaderName::from_bytes(k.as_str().as_bytes()),
                     HeaderValue::from_bytes(v.as_bytes()),
@@ -168,10 +173,35 @@ pub async fn chat_completions(
                     headers.insert(n, val);
                 }
             }
-            let mut r = Response::new(Body::from_stream(resp.bytes_stream()));
-            *r.status_mut()  = status;
-            *r.headers_mut() = headers;
-            r
+
+            // Buffer the full response body then rehydrate pseudo-tokens.
+            // This works for both streaming (SSE) and non-streaming JSON:
+            // pseudo-tokens (PERSON_7, IBAN_3) are short enough to never span chunk boundaries,
+            // so buffering the whole body and doing a single string-replace is correct.
+            match resp.bytes().await {
+                Ok(body_bytes) => {
+                    let body_str = String::from_utf8_lossy(&body_bytes).into_owned();
+                    let pool = Arc::clone(&state.engine_pool);
+                    let rehydrated = tokio::task::spawn_blocking(move || {
+                        pool.rehydrate_text(&body_str)
+                    })
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(error = %e, "rehydration spawn_blocking panicked — returning raw body");
+                        String::from_utf8_lossy(&body_bytes).into_owned()
+                    });
+                    let mut r = Response::new(Body::from(rehydrated));
+                    *r.status_mut()  = status;
+                    *r.headers_mut() = headers;
+                    r
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to buffer upstream response for rehydration");
+                    let mut r = Response::new(Body::from(format!(r#"{{"error":"upstream read failed: {e}"}}"#)));
+                    *r.status_mut() = StatusCode::BAD_GATEWAY;
+                    r
+                }
+            }
         }
         Err(e) => {
             let mut r = Response::new(Body::from(format!(r#"{{"error":"{e}"}}"#)));

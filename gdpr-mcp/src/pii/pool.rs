@@ -49,6 +49,20 @@ impl EnginePool {
         Self::run(&mut engine, texts)
     }
 
+    /// Rehydrate a previously anonymized text, restoring original PII values.
+    ///
+    /// Uses any available pool slot (rehydration is read-only on the vault — any slot works).
+    /// Falls back to slot 0 if all slots are busy.
+    pub fn rehydrate_text(&self, text: &str) -> String {
+        for slot in &self.slots {
+            if let Ok(engine) = slot.engine.try_lock() {
+                return engine.rehydrate(text).unwrap_or_else(|_| text.to_string());
+            }
+        }
+        let engine = self.slots[0].engine.lock().expect("pool slot 0 poisoned");
+        engine.rehydrate(text).unwrap_or_else(|_| text.to_string())
+    }
+
     fn run(engine: &mut PiiEngine, texts: &[&str]) -> Vec<String> {
         let mut ner_degraded = false;
         match engine.anonymize_batch(texts, &mut ner_degraded) {

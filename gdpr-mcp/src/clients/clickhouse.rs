@@ -34,6 +34,10 @@ pub struct GdprAuditRow {
     pub legal_basis:        String,
     pub user_id:            String,
     pub model_version:      String,
+    /// AI Act Art. 9 risk classification: "low" | "medium" | "high" | "critical"
+    pub ai_act_risk_level:  String,
+    /// AI Act Art. 13 transparency: human-readable summary of what was detected.
+    pub decision_explanation: String,
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
