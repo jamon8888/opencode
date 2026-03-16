@@ -107,7 +107,15 @@ impl TreatmentEngine {
             let entity_type = category.placeholder_base();
             return self.mask(value, entity_type, category, ctx);
         }
-        let index = ctx.pseudonym_index.len() % self.pool.len();
+        // Use sequential index (number of unique pseudonymized values so far).
+        // When pool is exhausted, fall back to mask — avoids collision where
+        // two distinct values would receive the same pseudonym via modular wrap.
+        let index = ctx.pseudonym_index.len();
+        if index >= self.pool.len() {
+            // Pool exhausted: fall back to mask to guarantee uniqueness
+            let entity_type = category.placeholder_base();
+            return self.mask(value, entity_type, category, ctx);
+        }
         let pseudonym = self.pool[index].clone();
         ctx.pseudonym_index.insert(value.to_string(), index);
         ctx.value_to_token.insert(value.to_string(), pseudonym.clone());
@@ -257,12 +265,21 @@ pub fn anonymize_with_profile(
         replacements.push((det.start, det.end, replaced));
     }
 
-    // Apply replacements in reverse order to preserve byte indices
+    // Apply replacements in reverse order to preserve byte indices.
+    // Guard both bounds AND UTF-8 char boundaries to avoid panics on
+    // accented French text (é, à, ê, etc. are multi-byte in UTF-8).
     let mut result = text.to_string();
     replacements.sort_by(|a, b| b.0.cmp(&a.0));
     for (start, end, replacement) in replacements {
-        if start <= result.len() && end <= result.len() && start <= end {
+        if start <= result.len()
+            && end <= result.len()
+            && start <= end
+            && result.is_char_boundary(start)
+            && result.is_char_boundary(end)
+        {
             result.replace_range(start..end, &replacement);
+        } else {
+            tracing::warn!(start, end, "Skipping replacement: not on UTF-8 char boundary");
         }
     }
 
