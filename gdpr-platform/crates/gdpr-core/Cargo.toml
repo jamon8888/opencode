@@ -34,3 +34,5 @@ tokio-stream     = { workspace = true }
 futures-util     = { workspace = true }
 cloakpipe-core   = { workspace = true }
 gline-rs         = { workspace = true }
+hkdf             = { workspace = true }
+sha2             = { workspace = true }

@@ -83,12 +83,12 @@ pub async fn post_chat_completions(
     let pool = Arc::clone(&state.engine_pool);
     let batch_results = tokio::task::spawn_blocking(move || {
         let refs: Vec<&str> = raw_texts.iter().map(|s| s.as_str()).collect();
-        let mut ner_degraded = false;
+        let mut ner_degraded = vec![false; refs.len()];
         pool.anonymize_batch(&refs, &mut ner_degraded)
     })
     .await
-    .map_err(|e| ApiError::Internal(anyhow::anyhow!("spawn_blocking join error: {e}")))?
-    .map_err(|e| ApiError::Internal(e))?;
+    .map_err(|e| ApiError::Internal(format!("spawn_blocking join error: {e}")))?
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     // Capture PII entity count before batch_results is consumed by later iterators
     let pii_count: u32 = batch_results.iter().map(|r| r.mappings.len() as u32).sum();

@@ -159,13 +159,16 @@ impl PiiEngine {
     /// Invariant I1: L1 failure returns `Err` (fatal — never pass raw text through).
     /// Invariant I2: L2 absent sets `ner_degraded = true`, continues with L1 only.
     ///
+    /// C7 fix: `ner_degraded` is now per-element (`Vec<bool>`) instead of a single global bool.
+    ///
     /// OPT-5: parallel detect via rayon, then serial pseudonymize (vault write is serial).
     pub fn anonymize_batch(
         &mut self,
         texts: &[&str],
-        ner_degraded: &mut bool,
+        ner_degraded: &mut Vec<bool>,
     ) -> anyhow::Result<Vec<AnonymizeResult>> {
-        *ner_degraded = !self.has_ner;
+        let degraded = !self.has_ner;
+        *ner_degraded = vec![degraded; texts.len()];
         // OPT-5: use rayon for parallel L1 detection across texts
         use rayon::prelude::*;
         let detected: anyhow::Result<Vec<_>> = texts
@@ -181,7 +184,7 @@ impl PiiEngine {
                 return Ok(AnonymizeResult {
                     text: t.to_string(),
                     entities: vec![],
-                    ner_degraded: *ner_degraded,
+                    ner_degraded: degraded,
                     pii_count: 0,
                     mappings: std::collections::HashMap::new(),
                 });
@@ -191,7 +194,7 @@ impl PiiEngine {
             Ok(AnonymizeResult {
                 text: pseudonymized.text,
                 entities: pseudonymized.entities,
-                ner_degraded: *ner_degraded,
+                ner_degraded: degraded,
                 pii_count,
                 mappings: pseudonymized.mappings,
             })
@@ -232,12 +235,15 @@ impl PiiEngine {
         Ok(config)
     }
 
-    /// Derive a 32-byte AES-256 key from the `CLOAKPIPE_VAULT_KEY` env var.
-    /// Pads with zeros or truncates to exactly 32 bytes.
+    /// Derive a 32-byte AES-256 key from the `CLOAKPIPE_VAULT_KEY` env var
+    /// using HKDF-SHA256 (C2 fix: replaces insecure zero-padding).
     fn key_from_env() -> Vec<u8> {
         let raw = std::env::var("CLOAKPIPE_VAULT_KEY").unwrap_or_default();
-        let mut key = raw.into_bytes();
-        key.resize(32, 0u8);
-        key
+        let raw_key_bytes = raw.as_bytes();
+        let hk = hkdf::Hkdf::<sha2::Sha256>::new(None, raw_key_bytes);
+        let mut key = [0u8; 32];
+        hk.expand(b"gdpr-vault-key-v1", &mut key)
+            .expect("HKDF expand: 32 bytes always fits");
+        key.to_vec()
     }
 }

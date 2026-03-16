@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use anyhow::Result;
 use deadpool_sqlite::Pool;
-use parking_lot::Mutex;
 
 use crate::pii::engine::PiiEngine;
 use crate::pii::pool::EnginePool;
@@ -11,8 +10,9 @@ use crate::clients::vec_store::VecStore;
 use crate::resilience::CircuitBreaker;
 
 /// Shared application state threaded through all handlers.
+/// C8 fix: removed redundant `pii_engine: Arc<Mutex<PiiEngine>>` —
+/// `engine_pool: Arc<EnginePool>` is the only correct access path.
 pub struct CoreState {
-    pub pii_engine:   Arc<Mutex<PiiEngine>>,
     pub db:           Pool,
     /// Entity-level audit map (which entities were found per document).
     pub doc_audit:    DocAuditDb,
@@ -45,7 +45,6 @@ impl CoreState {
         // Pool size = num CPUs (regex + ONNX is CPU-bound; more slots than cores = contention)
         let pool_size   = num_cpus::get().max(2);
         let engine_pool = Arc::new(EnginePool::new(pool_size, pii_engine.try_clone()?)?);
-        let pii_engine  = Arc::new(Mutex::new(pii_engine));
 
         let clickhouse = std::env::var("CLICKHOUSE_URL").ok().map(|url| {
             tracing::info!(url = %url, "ClickHouse audit trail enabled");
@@ -63,7 +62,6 @@ impl CoreState {
         let kreuzberg_cb = CircuitBreaker::new("kreuzberg", 5, std::time::Duration::from_secs(30));
 
         Ok(Arc::new(Self {
-            pii_engine,
             db: pool,
             doc_audit,
             kreuzberg_cb,
