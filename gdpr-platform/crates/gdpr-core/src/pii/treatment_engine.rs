@@ -211,6 +211,9 @@ pub struct ProfileAnonymizeResult {
     pub ner_degraded: bool,
     pub treatment_breakdown: HashMap<String, String>,
     pub kept_entities: Vec<String>,
+    /// Token→original map for session-based deanonymization.
+    /// Keyed by token placeholder (e.g. "[PERSON_1]"), valued by original text.
+    pub token_map: HashMap<String, String>,
 }
 
 /// Run profile-aware anonymization on text using L1 regex detection.
@@ -283,6 +286,14 @@ pub fn anonymize_with_profile(
         }
     }
 
+    // Build token_map (token → original) from session_ctx.value_to_token (original → token)
+    // Used by the API layer to populate session_cache for deanonymization.
+    let token_map: HashMap<String, String> = session_ctx
+        .value_to_token
+        .iter()
+        .map(|(original, token)| (token.clone(), original.clone()))
+        .collect();
+
     Ok(ProfileAnonymizeResult {
         text: result,
         profile,
@@ -290,6 +301,7 @@ pub fn anonymize_with_profile(
         ner_degraded,
         treatment_breakdown,
         kept_entities,
+        token_map,
     })
 }
 

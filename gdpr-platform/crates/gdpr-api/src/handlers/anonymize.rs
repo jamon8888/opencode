@@ -79,8 +79,18 @@ pub async fn post_anonymize(
 
     let processing_ms = start.elapsed().as_millis() as u32;
 
-    // Store session in cache for future deanonymize lookups
-    // TODO: T7 — populate session_cache token_map from SessionContext
+    // Populate session_cache: token → original (from ProfileAnonymizeResult.token_map)
+    {
+        let dm = dashmap::DashMap::new();
+        for (token, original) in &result.token_map {
+            dm.insert(token.clone(), original.clone());
+        }
+        let sc = crate::state::SessionCache {
+            token_map:  dm,
+            created_at: std::time::Instant::now(),
+        };
+        state.session_cache.insert(session_id.clone(), sc);
+    }
 
     // Emit ClickHouse audit row (best-effort)
     if let Some(ref ch) = state.clickhouse {
@@ -130,12 +140,13 @@ pub async fn post_deanonymize(
 ) -> ApiResult<Json<DeanonymizeResp>> {
     let result_text = if let Some(ref sid) = req.session_id {
         if let Some(session) = state.session_cache.get(sid) {
-            // Build reverse map: token -> original
+            // token_map is keyed by token (e.g. "[PERSON_1]"), valued by original
+            // Replace each token placeholder with its original value
             let mut reversed = req.text.clone();
             for entry in session.token_map.iter() {
-                let original = entry.key();
-                let token = entry.value();
-                reversed = reversed.replace(token.as_str(), original);
+                let token    = entry.key();   // "[PERSON_1]"
+                let original = entry.value(); // "Jean Dupont"
+                reversed = reversed.replace(token.as_str(), original.as_str());
             }
             reversed
         } else {
