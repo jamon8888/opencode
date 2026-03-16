@@ -11,8 +11,7 @@ use tower_http::{
 use std::time::Duration;
 use crate::state::AppState;
 use crate::handlers;
-use crate::middleware::{AuthLayer, MeterLayer, SecurityHeadersLayer};
-use crate::middleware::rate_limit::RateLimitJitterLayer;
+use crate::middleware::{AuthLayer, RateLimitLayer, MeterLayer, SecurityHeadersLayer};
 
 pub fn build(state: AppState) -> Router {
     // Public routes (no auth required)
@@ -51,7 +50,7 @@ pub fn build(state: AppState) -> Router {
         .route("/v1/ai/feedback", post(handlers::ai::post_feedback))
         // Auth middleware stack (order: outermost layer runs first)
         .layer(MeterLayer::new(state.clone()))
-        .layer(RateLimitJitterLayer)
+        .layer(RateLimitLayer::new())
         .layer(AuthLayer::new(state.clone()));
 
     // Wire global middleware
