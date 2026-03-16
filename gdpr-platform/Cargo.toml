@@ -33,6 +33,8 @@ rayon            = "1"
 regex            = "1"
 tokio-stream     = { version = "0.1", features = ["sync"] }
 futures-util     = "0.3"
+governor         = { version = "0.6", features = ["dashmap"] }
+jsonwebtoken     = "9"
 cloakpipe-core   = { git = "https://github.com/rohansx/cloakpipe", package = "cloakpipe-core", rev = "55a6b06c33578cee6d3b456ffbb8dd73e10750c4" }
 gline-rs         = "1"
 hkdf             = "0.12"

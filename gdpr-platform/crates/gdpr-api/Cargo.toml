@@ -32,6 +32,10 @@ regex              = { workspace = true }
 futures-util       = { workspace = true }
 tokio-stream       = { workspace = true }
 rusqlite           = { workspace = true }
+governor           = { workspace = true }
+jsonwebtoken       = { workspace = true }
+parking_lot        = { workspace = true }
+http               = "1"
 axum-extra         = { version = "0.10", features = ["typed-header"] }
 axum-server        = { version = "0.7", features = ["tls-rustls"] }
 rustls             = "0.23"
