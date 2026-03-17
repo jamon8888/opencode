@@ -67,3 +67,57 @@ CREATE TABLE IF NOT EXISTS gdpr_billing (
     requests_count  UInt32
 ) ENGINE = SummingMergeTree(tokens_in, tokens_out, documents_count, requests_count)
 ORDER BY (api_key_id, month);
+
+-- ── Extend gdpr_audit with multi-tenant correlation (GDPR Art. 30) ────────────
+ALTER TABLE gdpr_audit ADD COLUMN IF NOT EXISTS tenant_id  String DEFAULT '';
+ALTER TABLE gdpr_audit ADD COLUMN IF NOT EXISTS request_id String DEFAULT '';
+ALTER TABLE gdpr_audit ADD COLUMN IF NOT EXISTS api_key_id String DEFAULT '';
+
+-- ── Usage events (billing metering — high-volume, append-only) ───────────────
+CREATE TABLE IF NOT EXISTS usage_events (
+    id            UUID     DEFAULT generateUUIDv4(),
+    tenant_id     String,
+    api_key_id    String,
+    request_id    String,
+    event_type    Enum8('ingest'=1,'search'=2,'anonymize'=3,'ai_chat'=4,'delete'=5),
+    document_id   String   DEFAULT '',
+    chars_in      UInt64   DEFAULT 0,
+    chars_out     UInt64   DEFAULT 0,
+    doc_count     UInt32   DEFAULT 1,
+    chunk_count   UInt32   DEFAULT 0,
+    ai_tokens_in  UInt32   DEFAULT 0,
+    ai_tokens_out UInt32   DEFAULT 0,
+    ner_tier      Enum8('l1'=1,'l1_l2'=2) DEFAULT 'l1',
+    latency_ms    UInt32   DEFAULT 0,
+    ts            DateTime DEFAULT now()
+) ENGINE = MergeTree()
+  PARTITION BY toYYYYMM(ts)
+  ORDER BY (tenant_id, ts)
+  SETTINGS index_granularity = 8192;
+
+-- ── Billing snapshots (materialized view target) ──────────────────────────────
+CREATE TABLE IF NOT EXISTS billing_snapshots (
+    tenant_id           String,
+    period_ym           UInt32,
+    total_docs          UInt64,
+    total_chars_in      UInt64,
+    total_rag_queries   UInt64,
+    total_ai_tokens_in  UInt64,
+    total_ai_tokens_out UInt64,
+    computed_at         DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(computed_at)
+  ORDER BY (tenant_id, period_ym);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_billing_snapshots
+TO billing_snapshots AS
+SELECT
+    tenant_id,
+    toYYYYMM(ts)                             AS period_ym,
+    countIf(event_type = 'ingest')           AS total_docs,
+    sum(chars_in)                            AS total_chars_in,
+    countIf(event_type = 'search')           AS total_rag_queries,
+    sum(toUInt64(ai_tokens_in))              AS total_ai_tokens_in,
+    sum(toUInt64(ai_tokens_out))             AS total_ai_tokens_out,
+    now()                                    AS computed_at
+FROM usage_events
+GROUP BY tenant_id, toYYYYMM(ts);
