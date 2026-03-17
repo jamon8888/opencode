@@ -66,22 +66,53 @@ Five gdpr-api handlers are currently stubs and must be real before gdpr-mcp can 
 
 **Implementation:**
 1. Use the `text` field directly (no kreuzberg for T5 — text-only ingest)
-2. Anonymize using the same code path as the existing `POST /v1/anonymize` handler. This requires constructing a `SessionContext` and `TreatmentEngine` before calling `anonymize_with_profile`. Follow the pattern in `handlers/anonymize.rs` `post_anonymize` exactly:
+2. Anonymize using the same code path as the existing `POST /v1/anonymize` handler (`handlers/anonymize.rs`). Follow this pattern exactly:
    ```rust
-   let mut session_ctx = SessionContext::new(session_id, legal_basis.clone());
-   let engine = TreatmentEngine::from_pool(&state.engine_pool, &profile);
-   let result = gdpr_core::pii::anonymize_with_profile(&text, &profile, &mut session_ctx, &engine)?;
+   use gdpr_core::pii::{AnonProfile, SessionContext, TreatmentEngine, anonymize_with_profile, get_pool};
+
+   let session_id = uuid::Uuid::new_v4().to_string();
+   let mut session_ctx = SessionContext::new(profile);          // takes AnonProfile only
+   let pool_strings: Vec<String> = get_pool(&profile).iter().map(|s| s.to_string()).collect();
+   let engine = TreatmentEngine::new(pool_strings);             // takes Vec<String>
+   let result = tokio::task::spawn_blocking(move || {
+       anonymize_with_profile(&text, profile, &mut session_ctx, &engine)
+   }).await??;
+   // Store token map in session_cache so deanonymize works for this doc
+   {
+       let dm = dashmap::DashMap::new();
+       for (token, original) in &result.token_map {
+           dm.insert(token.clone(), original.clone());
+       }
+       state.session_cache.insert(session_id.clone(), crate::state::SessionCache {
+           token_map: dm, created_at: std::time::Instant::now(),
+       });
+   }
    ```
-   Store the resulting `session_ctx` (which holds token map) into `state.session_cache` under the generated `session_id`, consistent with how `post_anonymize` does it.
 3. Chunk with `chunk_text` from gdpr-core using **400-word chunks with 50-word overlap** (matching existing MCP server constants)
-4. Store in SQLite:
-   - Insert into `documents` table
-   - Insert each chunk into `doc_chunks` table
-   - Insert each detected entity into `doc_entity_map`. The full table schema (from `config/clickhouse/init.sql` and CoreState migrations) is:
-     ```sql
-     INSERT INTO doc_entity_map (doc_id, entity_type, token, confidence, pseudonym) VALUES (?, ?, ?, ?, ?)
-     ```
-     Fields: `doc_id TEXT`, `entity_type TEXT`, `token TEXT` (original), `confidence REAL` (0.0–1.0), `pseudonym TEXT` (replacement token). No `DocAudit` helper exists in `AppState`; use `state.db.execute(...)` directly.
+4. Store in SQLite using `state.db`. **First, ensure the document storage tables exist** — add these migrations to `gdpr-api/src/main.rs` (alongside `api_keys` and `usage_records`):
+   ```sql
+   CREATE TABLE IF NOT EXISTS documents (
+       id TEXT PRIMARY KEY, anon_text TEXT NOT NULL, pii_count INTEGER NOT NULL,
+       ner_degraded INTEGER NOT NULL, created_at INTEGER NOT NULL
+   );
+   CREATE TABLE IF NOT EXISTS doc_chunks (
+       id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, chunk_idx INTEGER NOT NULL,
+       chunk_text TEXT NOT NULL, chunk_offset INTEGER NOT NULL, created_at INTEGER NOT NULL
+   );
+   CREATE TABLE IF NOT EXISTS doc_entity_map (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       document_id TEXT NOT NULL, entity_type TEXT NOT NULL,
+       pseudonym TEXT NOT NULL, detection_layer TEXT NOT NULL,
+       confidence REAL, ner_degraded INTEGER NOT NULL DEFAULT 0,
+       created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+   );
+   ```
+   Then insert:
+   - `INSERT INTO documents (id, anon_text, pii_count, ner_degraded, created_at) VALUES (?, ?, ?, ?, unixepoch())`
+   - `INSERT INTO doc_chunks (id, doc_id, chunk_idx, chunk_text, chunk_offset, created_at) VALUES (?, ?, ?, ?, ?, unixepoch())` per chunk
+   - `INSERT INTO doc_entity_map (document_id, entity_type, pseudonym, detection_layer, confidence, ner_degraded) VALUES (?, ?, ?, ?, ?, ?)` per entity
+
+   No `DocAudit` helper exists in `AppState`; use `state.db.get().await?.interact(|c| { ... })` directly.
 5. Write ClickHouse audit trail
 6. Return full response
 
@@ -315,12 +346,23 @@ pub struct SearchResponse {
 }
 
 // --- Audit ---
-// Field names match actual gdpr-api AuditEvent serialization (audit.rs)
+// Field names match actual gdpr-api AuditEvent struct (audit.rs) exactly.
+// All 12 fields included — GDPR compliance fields (legal_basis, ai_act_risk_level,
+// decision_explanation) must be surfaced to AI agents for audit purposes.
 #[derive(Deserialize)]
 pub struct AuditEntry {
-    pub document_id: String,
-    pub action: String,
-    pub ts_unix: u64,
+    pub document_id:          String,
+    pub action:               String,
+    pub pii_count_before:     u32,
+    pub pii_count_after:      u32,
+    pub ner_degraded:         u8,
+    pub processing_time_ms:   u32,
+    pub legal_basis:          String,
+    pub user_id:              String,
+    pub model_version:        String,
+    pub ai_act_risk_level:    String,
+    pub decision_explanation: String,
+    pub ts_unix:              u64,
 }
 #[derive(Deserialize)]
 pub struct AuditResponse {
@@ -462,8 +504,11 @@ The proxy's HTTP server on `:8080`, the slot collection/rehydration logic (`coll
 - `tokio-stream` (proxy SSE streaming: event streaming in `proxy/mod.rs`)
 - `regex` (proxy token rehydration: `TOKEN_RE` pattern in `proxy/mod.rs`)
 
+**Keep (already present):**
+- `anyhow` (used by `main.rs` — do NOT remove; not in the Remove list above but must be explicitly preserved)
+
 **Add (not currently in `gdpr-mcp/Cargo.toml`):**
-- `thiserror` (new dep, needed for `ApiError` — was not previously in gdpr-mcp)
+- `thiserror` (new dep, needed for `ApiError` — was not previously in gdpr-mcp; add as workspace dep or `thiserror = "2"`)
 
 **Add to `[dev-dependencies]`:**
 - `wiremock = "0.6"` (mock HTTP server for ApiClient unit tests)
@@ -508,6 +553,7 @@ No retries in gdpr-mcp — callers (AI agents, chat clients) own retry logic.
 
 | File | Action | Notes |
 |------|--------|-------|
+| `crates/gdpr-api/src/main.rs` | Add migrations | Add documents, doc_chunks, doc_entity_map CREATE TABLE IF NOT EXISTS to existing migration block |
 | `crates/gdpr-api/src/handlers/documents.rs` | Implement stubs | post_document, list_documents, delete_document |
 | `crates/gdpr-api/src/handlers/search.rs` | Implement stub | post_search |
 | `crates/gdpr-api/src/handlers/audit.rs` | Implement stub | get_review_queue |
