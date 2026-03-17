@@ -362,4 +362,13 @@ mod tests {
         let headers = axum::http::HeaderMap::new();
         assert_eq!(extract_bearer(&headers), None);
     }
+
+    #[test]
+    fn test_parse_plan() {
+        assert!(matches!(parse_plan("starter"), Plan::Starter));
+        assert!(matches!(parse_plan("business"), Plan::Business));
+        assert!(matches!(parse_plan("enterprise"), Plan::Enterprise));
+        assert!(matches!(parse_plan("unknown"), Plan::Starter)); // default
+        assert!(matches!(parse_plan(""), Plan::Starter));        // empty = default
+    }
 }

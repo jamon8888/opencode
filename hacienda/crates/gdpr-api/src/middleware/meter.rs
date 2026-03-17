@@ -108,36 +108,38 @@ where
                 .to_string();
 
             if let Some(rec) = metering {
-                let event = UsageEvent {
-                    tenant_id:     auth.tenant_id.clone(),
-                    api_key_id:    auth.api_key_id.clone(),
-                    request_id,
-                    event_type:    rec.event_type.unwrap_or(EventType::Ingest),
-                    document_id:   rec.document_id,
-                    chars_in:      rec.chars_in,
-                    chars_out:     rec.chars_out,
-                    doc_count:     rec.doc_count,
-                    chunk_count:   0,
-                    ai_tokens_in:  rec.ai_tokens_in,
-                    ai_tokens_out: rec.ai_tokens_out,
-                    ner_tier:      rec.ner_tier,
-                    latency_ms,
-                };
-                // NOTE: Meter::record is synchronous (fire-and-forget via tokio::spawn internally)
-                state.meter.record(event);
+                if let Some(event_type) = rec.event_type {
+                    let event = UsageEvent {
+                        tenant_id:     auth.tenant_id.clone(),
+                        api_key_id:    auth.api_key_id.clone(),
+                        request_id,
+                        event_type,
+                        document_id:   rec.document_id,
+                        chars_in:      rec.chars_in,
+                        chars_out:     rec.chars_out,
+                        doc_count:     rec.doc_count,
+                        chunk_count:   0,
+                        ai_tokens_in:  rec.ai_tokens_in,
+                        ai_tokens_out: rec.ai_tokens_out,
+                        ner_tier:      rec.ner_tier,
+                        latency_ms,
+                    };
+                    // NOTE: Meter::record is synchronous (fire-and-forget via tokio::spawn internally)
+                    state.meter.record(event);
 
-                // Optimistic cache update
-                state.snapshot_cache
-                    .entry(auth.tenant_id.clone())
-                    .and_modify(|(snap, ts)| {
-                        snap.total_docs          += rec.doc_count as u64;
-                        snap.total_chars_in      += rec.chars_in;
-                        snap.total_rag_queries   += if rec.event_type == Some(EventType::Search) { 1 } else { 0 };
-                        snap.total_ai_tokens_in  += rec.ai_tokens_in as u64;
-                        snap.total_ai_tokens_out += rec.ai_tokens_out as u64;
-                        *ts = Instant::now();
-                    })
-                    .or_insert_with(|| (snapshot, Instant::now()));
+                    // Optimistic cache update
+                    state.snapshot_cache
+                        .entry(auth.tenant_id.clone())
+                        .and_modify(|(snap, ts)| {
+                            snap.total_docs          += rec.doc_count as u64;
+                            snap.total_chars_in      += rec.chars_in;
+                            snap.total_rag_queries   += if event_type == EventType::Search { 1 } else { 0 };
+                            snap.total_ai_tokens_in  += rec.ai_tokens_in as u64;
+                            snap.total_ai_tokens_out += rec.ai_tokens_out as u64;
+                            *ts = Instant::now();
+                        })
+                        .or_insert_with(|| (snapshot, Instant::now()));
+                }
             }
 
             Ok(resp)

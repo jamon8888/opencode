@@ -70,6 +70,11 @@ async fn main() -> Result<()> {
         let _ = conn2.interact(|c| {
             // Idempotent: ignore error if column already exists
             let _ = c.execute("ALTER TABLE api_keys ADD COLUMN rotated_at INTEGER", []);
+            // T4: add plan column — .ok() swallows "duplicate column" on re-runs
+            c.execute(
+                "ALTER TABLE api_keys ADD COLUMN plan TEXT NOT NULL DEFAULT 'starter'",
+                [],
+            ).ok();
             Ok::<_, rusqlite::Error>(())
         }).await;
     }
