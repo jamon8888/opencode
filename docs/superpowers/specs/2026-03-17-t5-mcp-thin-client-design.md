@@ -151,9 +151,9 @@ pub struct DocList {
 
 **SQL query:** The `documents` table uses `id` as the primary key column, not `doc_id`. Use an alias:
 ```sql
-SELECT d.id AS doc_id, d.created_at, COUNT(e.doc_id) AS entity_count
+SELECT d.id AS doc_id, d.created_at, COUNT(e.document_id) AS entity_count
 FROM documents d
-LEFT JOIN doc_entity_map e ON d.id = e.doc_id
+LEFT JOIN doc_entity_map e ON d.id = e.document_id
 GROUP BY d.id
 ORDER BY d.created_at DESC
 ```
@@ -180,7 +180,7 @@ ORDER BY d.created_at DESC
 
 **Implementation:**
 1. Try VecStore semantic search if `state.vec_store` is `Some`
-2. Fall back to SQLite `LIKE` query on `doc_chunks.content`
+2. Fall back to SQLite `LIKE` query on `doc_chunks.chunk_text` (the actual column name in the DDL)
 3. Return top-N matching chunks with doc_id and score
 
 **Response:**
