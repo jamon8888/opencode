@@ -6,7 +6,10 @@ use rmcp::{
     model::{CallToolResult, Content, ServerInfo},
     tool, ServerHandler,
 };
-use tools::*;
+use tools::{
+    AnonymizeParams, AuditParams, DeleteParams, DeanonymizeParams,
+    IngestParams, ReviewQueueParams, SearchParams,
+};
 
 // ── Server ───────────────────────────────────────────────────────────────────
 
