@@ -24,7 +24,7 @@ pub struct AnonymizeRequest {
     pub session_id:  Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct AnonymizeResponse {
     pub anonymized_text: String,
     pub session_id:      String,
@@ -37,7 +37,7 @@ pub struct DeanonymizeRequest {
     pub session_id: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct DeanonymizeResponse {
     pub text: String,
 }
@@ -49,7 +49,7 @@ pub struct IngestRequest {
     pub profile:     Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct IngestResponse {
     pub doc_id:               String,
     pub pii_count:            usize,
@@ -59,14 +59,14 @@ pub struct IngestResponse {
     pub decision_explanation: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct DocEntry {
     pub doc_id:       String,
     pub created_at:   i64,
     pub entity_count: usize,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct ListDocumentsResponse {
     pub documents: Vec<DocEntry>,
 }
@@ -78,19 +78,19 @@ pub struct SearchRequest {
     pub profile: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct SearchResult {
     pub doc_id: String,
     pub chunk:  String,
     pub score:  f64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct SearchResponse {
     pub results: Vec<SearchResult>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct AuditEntry {
     pub document_id:          String,
     pub action:               String,
@@ -106,19 +106,19 @@ pub struct AuditEntry {
     pub ts_unix:              u64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct AuditResponse {
     pub events: Vec<AuditEntry>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct ReviewEntry {
     pub doc_id:       String,
     pub entity_count: usize,
     pub created_at:   i64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct ReviewQueueResponse {
     pub documents: Vec<ReviewEntry>,
 }

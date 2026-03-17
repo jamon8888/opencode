@@ -17,38 +17,27 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("gdpr-mcp starting");
 
-    // I4: vault key guard — identical to original
-    if std::env::var("CLOAKPIPE_VAULT_KEY").map(|k| k.is_empty()).unwrap_or(true) {
-        anyhow::bail!("CLOAKPIPE_VAULT_KEY must be set to a non-empty secret");
-    }
+    // Build ApiClient (thin-client: calls gdpr-api over HTTP) — T5
+    let api_client = Arc::new(api_client::ApiClient::from_env());
+
+    // MCP server
+    let mcp_server = mcp::GdprServer::new(Arc::clone(&api_client));
+
+    // HTTP anonymization proxy (:8080) — TODO T10: migrate to ApiClient
+    let proxy_addr = std::env::var("PROXY_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
     let vault_path = std::env::var("GDPR_VAULT_PATH")
         .unwrap_or_else(|_| "gdpr_vault.db".to_string());
-    let db_path = std::env::var("GDPR_DB_PATH")
-        .unwrap_or_else(|_| "gdpr_docs.db".to_string());
     let model_dir = std::env::var("GLINER_MODEL_DIR")
         .unwrap_or_else(|_| "models/gliner-pii-edge".to_string());
-
-    // load_production: L1 always, L2 if model present (Invariant I2)
     let pii_engine = gdpr_core::pii::engine::PiiEngine::load_production(&vault_path, &model_dir)?;
+    let engine_pool = Arc::new(gdpr_core::pii::pool::EnginePool::new(1, pii_engine)?);
 
-    // Build CoreState (deadpool — replaces all Arc<Mutex<Connection>> from original)
-    let core = gdpr_core::state::CoreState::new(pii_engine, &db_path).await?;
-
-    if core.vec_store.is_some() {
-        tracing::info!("VecStore enabled — semantic search active via Ollama embeddings");
-    }
-
-    // MCP server
-    let mcp_server = mcp::GdprServer::new(Arc::clone(&core));
-
-    // HTTP anonymization proxy (:8080)
-    let proxy_addr = std::env::var("PROXY_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let session_cache = Arc::new(dashmap::DashMap::new());
 
     let proxy_state = Arc::new(proxy::ProxyState {
-        engine_pool:  Arc::clone(&core.engine_pool),
+        engine_pool,
         http_client:  reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()?,
