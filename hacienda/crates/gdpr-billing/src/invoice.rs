@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use crate::meter::UsageRecord;
+use crate::client::UsageRecord;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Invoice {

@@ -60,19 +60,6 @@ pub struct MeteringRecord {
     pub ner_tier:      NerTier,
 }
 
-// ── UsageRecord (legacy — retained for client.rs / invoice.rs until Task 5) ──
-
-/// Legacy aggregate used by BillingClient and Invoice::generate.
-/// Will be removed in Task 5 when client.rs is deleted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageRecord {
-    pub api_key_id:      String,
-    pub month:           String,
-    pub tokens_in:       u64,
-    pub tokens_out:      u64,
-    pub requests_count:  u32,
-}
-
 // ── Meter ─────────────────────────────────────────────────────────────────────
 
 pub struct Meter {
@@ -86,7 +73,7 @@ impl Meter {
 
     /// Fire-and-forget: spawns a tokio task, never blocks the caller.
     /// On ClickHouse error: logs via tracing::warn!, does not panic or propagate.
-    pub async fn record(&self, event: UsageEvent) {
+    pub fn record(&self, event: UsageEvent) {
         let ch = Arc::clone(&self.clickhouse);
         tokio::spawn(async move {
             if let Err(e) = ch.write_batch_table("usage_events", &[event]).await {
@@ -152,7 +139,7 @@ mod tests {
             ner_tier:     NerTier::L1,
             latency_ms:   1,
         };
-        meter.record(event).await;
+        meter.record(event);
         // Give the spawned task time to complete and log the warning
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         // No panic = pass
