@@ -96,7 +96,8 @@ impl PriceSheet {
 
         // Document overage
         let doc_over = snapshot.total_docs.saturating_sub(limits.monthly_docs);
-        let doc_cost = doc_over * self.per_doc_millicents;
+        let doc_cost = ((doc_over as u128) * (self.per_doc_millicents as u128))
+            .min(u64::MAX as u128) as u64;
 
         // Character overage (pro-rated per million)
         let char_over = snapshot.total_chars_in.saturating_sub(limits.monthly_chars);
@@ -104,7 +105,8 @@ impl PriceSheet {
 
         // RAG query overage
         let rag_over = snapshot.total_rag_queries.saturating_sub(limits.monthly_rag);
-        let rag_cost = rag_over * self.per_rag_query_millicents;
+        let rag_cost = ((rag_over as u128) * (self.per_rag_query_millicents as u128))
+            .min(u64::MAX as u128) as u64;
 
         // AI token overage — limit is shared; split evenly between in/out
         let half_limit = limits.monthly_ai_tokens / 2;
@@ -113,7 +115,10 @@ impl PriceSheet {
         let token_cost = millicents_per_million(in_over, self.per_token_in_per_million)
                        + millicents_per_million(out_over, self.per_token_out_per_million);
 
-        doc_cost + char_cost + rag_cost + token_cost
+        doc_cost
+            .saturating_add(char_cost)
+            .saturating_add(rag_cost)
+            .saturating_add(token_cost)
     }
 }
 
@@ -196,5 +201,30 @@ mod tests {
         assert_eq!(Plan::Starter.rate_limit_rpm(), 60);
         assert_eq!(Plan::Business.rate_limit_rpm(), 300);
         assert_eq!(Plan::Enterprise.rate_limit_rpm(), 1000);
+    }
+
+    #[test]
+    fn test_overage_char_cost() {
+        // 1_000_000 chars over limit → millicents_per_million(1_000_000, 40_000)
+        // = (1_000_000 * 40_000) / 1_000_000 = 40_000
+        let snap = BillingSnapshot {
+            tenant_id: "t1".into(), period_ym: 202603,
+            total_chars_in: 6_000_000,  // Starter limit 5_000_000 → 1_000_000 over
+            ..Default::default()
+        };
+        assert_eq!(PriceSheet::default().calculate_overage(&snap, &Plan::Starter), 40_000);
+    }
+
+    #[test]
+    fn test_overage_token_cost() {
+        // Starter monthly_ai_tokens = 500_000; half_limit = 250_000
+        // 300_000 tokens_in → in_over = 50_000; cost = millicents_per_million(50_000, 150_000)
+        // = (50_000 * 150_000) / 1_000_000 = 7_500_000_000 / 1_000_000 = 7_500
+        let snap = BillingSnapshot {
+            tenant_id: "t1".into(), period_ym: 202603,
+            total_ai_tokens_in: 300_000,
+            ..Default::default()
+        };
+        assert_eq!(PriceSheet::default().calculate_overage(&snap, &Plan::Starter), 7_500);
     }
 }
