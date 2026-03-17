@@ -23,21 +23,12 @@ async fn main() -> anyhow::Result<()> {
     // MCP server
     let mcp_server = mcp::GdprServer::new(Arc::clone(&api_client));
 
-    // HTTP anonymization proxy (:8080) — TODO T10: migrate to ApiClient
+    // HTTP anonymization proxy (:8080) — T10: uses ApiClient (thin-client)
     let proxy_addr = std::env::var("PROXY_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
-    let vault_path = std::env::var("GDPR_VAULT_PATH")
-        .unwrap_or_else(|_| "gdpr_vault.db".to_string());
-    let model_dir = std::env::var("GLINER_MODEL_DIR")
-        .unwrap_or_else(|_| "models/gliner-pii-edge".to_string());
-    let pii_engine = gdpr_core::pii::engine::PiiEngine::load_production(&vault_path, &model_dir)?;
-    let engine_pool = Arc::new(gdpr_core::pii::pool::EnginePool::new(1, pii_engine)?);
-
-    let session_cache = Arc::new(dashmap::DashMap::new());
-
     let proxy_state = Arc::new(proxy::ProxyState {
-        engine_pool,
+        api_client:   Arc::clone(&api_client),
         http_client:  reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()?,
@@ -45,19 +36,6 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|_| "http://localhost:3000/openai/v1".to_string()),
         upstream_key: std::env::var("TENSORZERO_KEY")
             .unwrap_or_else(|_| "hacienda".to_string()),
-        session_cache: Arc::clone(&session_cache),
-    });
-
-    // Session GC: evict entries idle for > 30 minutes, every 5 minutes.
-    let sc_gc = Arc::clone(&session_cache);
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-        loop {
-            interval.tick().await;
-            sc_gc.retain(|_, v: &mut proxy::SessionCache| {
-                v.created_at.elapsed() < std::time::Duration::from_secs(1800)
-            });
-        }
     });
 
     let app = Router::new()

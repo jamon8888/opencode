@@ -1,21 +1,18 @@
 //! HTTP anonymization proxy — `POST /openai/v1/chat/completions`.
 //!
-//! Pipeline:
+//! Pipeline (T5 thin-client):
 //! 1. Collect all text slots from `messages` into a flat `Vec<String>`.
-//! 2. `spawn_blocking` → `EnginePool::anonymize_batch` (L1 regex + L2 ONNX).
-//! 3. Build a per-session token→original map from the anonymization results.
-//! 4. Write cleaned strings back into `req.messages`, preserving structure.
-//! 5. Forward to TensorZero.
-//! 6. If SSE (`text/event-stream`): stream chunks through `rehydrate_from_cache`,
-//!    replacing pseudo-tokens in real time without buffering the full body.
-//!    If non-SSE: buffer the body and rehydrate in one pass.
+//! 2. Join texts with separator and call `api_client.anonymize`.
+//! 3. Split anonymized text back into slots and write into `req.messages`.
+//! 4. Forward to TensorZero.
+//! 5. Buffer the full response body (SSE or non-SSE).
+//! 6. Call `api_client.deanonymize` once to rehydrate pseudo-tokens.
+//!    Returns non-streaming even for SSE upstreams (T5 trade-off).
 //!
 //! Note: This proxy is transparent — OpenCode configures it as the `baseURL` for
 //! the `hacienda` provider in `opencode.json`. All conversation traffic flows through it.
 
 use std::sync::Arc;
-use std::time::Instant;
-
 use axum::{
     body::Body,
     extract::State,
@@ -23,32 +20,9 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
-use dashmap::DashMap;
-use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::OnceLock;
-
-use gdpr_core::pii::pool::EnginePool;
-
-// ── Token regex ───────────────────────────────────────────────────────────────
-
-static TOKEN_RE: OnceLock<regex::Regex> = OnceLock::new();
-
-fn token_re() -> &'static regex::Regex {
-    TOKEN_RE.get_or_init(|| {
-        // Matches pseudo-tokens like PERSON_7, IBAN_3, EMAIL_12, etc.
-        regex::Regex::new(r"[A-Z][A-Z0-9_]+_\d+").unwrap()
-    })
-}
-
-// ── Session cache types ───────────────────────────────────────────────────────
-
-pub struct SessionCache {
-    /// Maps pseudo-token (e.g. "PERSON_7") → original value (e.g. "Jean Dupont").
-    pub token_map:  DashMap<String, String>,
-    pub created_at: Instant,
-}
+use crate::api_client::{ApiClient, AnonymizeRequest, DeanonymizeRequest};
 
 // ── Request / response types ──────────────────────────────────────────────────
 
@@ -86,13 +60,10 @@ pub struct ChatCompletionRequest {
 // ── Shared state for axum handler ─────────────────────────────────────────────
 
 pub struct ProxyState {
-    pub engine_pool:   Arc<EnginePool>,
-    pub http_client:   reqwest::Client,
-    pub upstream_url:  String,   // e.g. "http://localhost:3000/openai/v1"
-    pub upstream_key:  String,
-    /// Per-session token→original maps, keyed by session UUID.
-    /// Entries are GC'd after 30 minutes of inactivity (see main.rs).
-    pub session_cache: Arc<DashMap<String, SessionCache>>,
+    pub api_client:   Arc<ApiClient>,
+    pub http_client:  reqwest::Client,
+    pub upstream_url: String,   // e.g. "http://localhost:3000/openai/v1"
+    pub upstream_key: String,
 }
 
 // ── Helper functions (pub for tests) ──────────────────────────────────────────
@@ -148,44 +119,6 @@ pub fn write_text_slots(
     }
 }
 
-// ── Rehydration helpers ────────────────────────────────────────────────────────
-
-/// Replace pseudo-tokens in `text` using a shared `Arc<DashMap>` token map.
-/// Used in the SSE streaming path where we pass an Arc clone per-chunk.
-fn rehydrate_from_cache(
-    text: &str,
-    token_map: &Option<Arc<DashMap<String, String>>>,
-) -> String {
-    let Some(map) = token_map else {
-        return text.to_string();
-    };
-    token_re()
-        .replace_all(text, |caps: &regex::Captures| {
-            map.get(&caps[0])
-                .map(|v| v.value().clone())
-                .unwrap_or_else(|| caps[0].to_string())
-        })
-        .into_owned()
-}
-
-/// Replace pseudo-tokens in `text` using an owned `DashMap` token map.
-/// Used in the non-SSE buffered path.
-fn rehydrate_from_cache_owned(
-    text: &str,
-    token_map: &Option<DashMap<String, String>>,
-) -> String {
-    let Some(map) = token_map else {
-        return text.to_string();
-    };
-    token_re()
-        .replace_all(text, |caps: &regex::Captures| {
-            map.get(&caps[0])
-                .map(|v| v.value().clone())
-                .unwrap_or_else(|| caps[0].to_string())
-        })
-        .into_owned()
-}
-
 // ── Axum handler ─────────────────────────────────────────────────────────────
 
 pub async fn chat_completions(
@@ -196,63 +129,36 @@ pub async fn chat_completions(
     // 1. Collect text slots
     let (raw_texts, slots) = collect_text_slots(&req.messages);
 
-    // Session ID for this request — used to key the token map
-    let session_id = uuid::Uuid::new_v4().to_string();
-
-    // 2. spawn_blocking batch anonymize — CPU-bound (regex + ONNX)
+    // 2. Anonymize via gdpr-api
+    let session_id: Option<String>;
     if !raw_texts.is_empty() {
-        let pool   = Arc::clone(&state.engine_pool);
-        let cloned = raw_texts.clone();
-
-        // Use anonymize_batch (returns AnonymizeResult with entities) so we can
-        // extract per-entity token→original mappings for session rehydration.
-        let batch_result: Result<Vec<gdpr_core::pii::AnonymizeResult>, _> =
-            tokio::task::spawn_blocking(move || {
-                let mut _ner_degraded = vec![false; cloned.len()];
-                pool.anonymize_batch(
-                    &cloned.iter().map(String::as_str).collect::<Vec<_>>(),
-                    &mut _ner_degraded,
-                )
-            })
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "spawn_blocking panic — blocking content");
-                Err(anyhow::anyhow!("spawn_blocking panic: {e}"))
-            });
-
-        match batch_result {
-            Ok(results) => {
-                // 3. Build session token map: pseudo-token → original value.
-                //    AnonymizeResult.mappings is populated by Replacer::pseudonymize and
-                //    contains exactly the token→original pairs we need (e.g. "PERSON_7" → "Jean Dupont").
-                let token_map: DashMap<String, String> = DashMap::new();
-                for anon_result in results.iter() {
-                    for (token, original_value) in &anon_result.mappings {
-                        token_map.insert(token.clone(), original_value.clone());
-                    }
-                }
-
-                state.session_cache.insert(session_id.clone(), SessionCache {
-                    token_map,
-                    created_at: Instant::now(),
-                });
-
-                // 4. Write cleaned strings back
-                let cleaned: Vec<String> = results.into_iter().map(|r| r.text).collect();
+        let joined = raw_texts.join("\n---\n");
+        match state.api_client.anonymize(AnonymizeRequest {
+            text: joined,
+            legal_basis: "legitimate_interest".to_string(),
+            ..Default::default()
+        }).await {
+            Ok(anon_resp) => {
+                session_id = Some(anon_resp.session_id);
+                // Split the anonymized text back into slots
+                let cleaned: Vec<String> = anon_resp.anonymized_text
+                    .splitn(raw_texts.len(), "\n---\n")
+                    .map(|s| s.to_string())
+                    .collect();
                 write_text_slots(&mut req.messages, &cleaned, &slots);
             }
             Err(e) => {
-                tracing::error!(error = %e, "anonymize_batch failed — blocking request");
-                let fallback = vec![
-                    "[PII_DETECTION_ERROR: content blocked]".to_string();
-                    raw_texts.len()
-                ];
+                tracing::error!(error = %e, "gdpr-api anonymize failed — blocking request");
+                session_id = None;
+                let fallback = vec!["[PII_DETECTION_ERROR: content blocked]".to_string(); raw_texts.len()];
                 write_text_slots(&mut req.messages, &fallback, &slots);
             }
         }
+    } else {
+        session_id = None;
     }
 
-    // 5. Forward to TensorZero
+    // 3. Forward to TensorZero
     let upstream_resp = state
         .http_client
         .post(format!("{}/chat/completions", state.upstream_url))
@@ -289,80 +195,73 @@ pub async fn chat_completions(
             }
 
             if is_sse {
-                // ── SSE streaming path ─────────────────────────────────────
-                // Retrieve the Arc'd token map for this session so each chunk
-                // closure gets an independent Arc (no borrow across await).
-                let token_map: Option<Arc<DashMap<String, String>>> = state
-                    .session_cache
-                    .get(&session_id)
-                    .map(|entry| {
-                        // Collect into a new DashMap then wrap in Arc so the
-                        // closure owns it independently of the DashMap entry ref.
-                        let m: DashMap<String, String> = entry
-                            .token_map
-                            .iter()
-                            .map(|kv| (kv.key().clone(), kv.value().clone()))
-                            .collect();
-                        Arc::new(m)
-                    });
-                // Arc keeps the map alive for the stream closure; remove the
-                // cache entry immediately so raw PII originals are not retained.
-                state.session_cache.remove(&session_id);
-
-                let byte_stream = resp.bytes_stream();
-                let mapped = byte_stream.map(move |chunk_result| {
-                    let bytes = chunk_result.map_err(|e| e.to_string())?;
-                    let text  = String::from_utf8_lossy(&bytes).into_owned();
-                    let rehydrated = rehydrate_from_cache(&text, &token_map);
-                    Ok::<axum::body::Bytes, String>(axum::body::Bytes::from(rehydrated))
-                });
-
-                let body = Body::from_stream(mapped);
-                let mut r = Response::new(body);
-                *r.status_mut()  = status;
-                *r.headers_mut() = headers;
-                return r;
-            }
-
-            // ── Non-SSE buffered path ──────────────────────────────────────
-            match resp.bytes().await {
-                Ok(body_bytes) => {
-                    let token_map: Option<DashMap<String, String>> = state
-                        .session_cache
-                        .get(&session_id)
-                        .map(|entry| {
-                            entry
-                                .token_map
-                                .iter()
-                                .map(|kv| (kv.key().clone(), kv.value().clone()))
-                                .collect()
-                        });
-                    // Remove cache entry immediately; token_map is an owned copy.
-                    state.session_cache.remove(&session_id);
-
-                    // For non-2xx upstream errors: return sanitized error, do not rehydrate
-                    if !status.is_success() {
-                        tracing::warn!(status = %status, "upstream returned error — returning sanitized error");
-                        let mut r = Response::new(Body::from(r#"{"error":"upstream error — see server logs"}"#));
+                // Buffer the full SSE response, then deanonymize once (T5 trade-off)
+                match resp.bytes().await {
+                    Ok(body_bytes) => {
+                        let body_str = String::from_utf8_lossy(&body_bytes).into_owned();
+                        let rehydrated = if let Some(ref sid) = session_id {
+                            match state.api_client.deanonymize(DeanonymizeRequest {
+                                text: body_str.clone(),
+                                session_id: Some(sid.clone()),
+                                ..Default::default()
+                            }).await {
+                                Ok(r) => r.text,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "deanonymize failed — returning anonymized text");
+                                    body_str
+                                }
+                            }
+                        } else {
+                            body_str
+                        };
+                        let mut r = Response::new(Body::from(rehydrated));
+                        *r.status_mut() = status;
+                        r
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to buffer SSE response");
+                        let mut r = Response::new(Body::from(r#"{"error":"upstream read failed"}"#));
+                        *r.status_mut() = StatusCode::BAD_GATEWAY;
+                        r
+                    }
+                }
+            } else {
+                // Non-SSE buffered path
+                match resp.bytes().await {
+                    Ok(body_bytes) => {
+                        if !status.is_success() {
+                            let mut r = Response::new(Body::from(r#"{"error":"upstream error — see server logs"}"#));
+                            *r.status_mut() = status;
+                            *r.headers_mut() = headers;
+                            return r;
+                        }
+                        let body_str = String::from_utf8_lossy(&body_bytes).into_owned();
+                        let rehydrated = if let Some(ref sid) = session_id {
+                            match state.api_client.deanonymize(DeanonymizeRequest {
+                                text: body_str.clone(),
+                                session_id: Some(sid.clone()),
+                                ..Default::default()
+                            }).await {
+                                Ok(r) => r.text,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "deanonymize failed — returning anonymized text");
+                                    body_str
+                                }
+                            }
+                        } else {
+                            body_str
+                        };
+                        let mut r = Response::new(Body::from(rehydrated));
                         *r.status_mut() = status;
                         *r.headers_mut() = headers;
-                        return r;
+                        r
                     }
-
-                    let body_str = String::from_utf8_lossy(&body_bytes).into_owned();
-                    let rehydrated = rehydrate_from_cache_owned(&body_str, &token_map);
-                    let mut r = Response::new(Body::from(rehydrated));
-                    *r.status_mut()  = status;
-                    *r.headers_mut() = headers;
-                    r
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to buffer upstream response for rehydration");
-                    let mut r = Response::new(Body::from(format!(
-                        r#"{{"error":"upstream read failed: {e}"}}"#
-                    )));
-                    *r.status_mut() = StatusCode::BAD_GATEWAY;
-                    r
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to read upstream response body");
+                        let mut r = Response::new(Body::from(r#"{"error":"upstream read failed"}"#));
+                        *r.status_mut() = StatusCode::BAD_GATEWAY;
+                        r
+                    }
                 }
             }
         }
