@@ -35,21 +35,10 @@ impl BillingClient {
         self.caps.insert(api_key_id.to_string(), cap);
     }
 
-    pub fn check_cap(&self, api_key_id: &str, estimated_tokens: u64) -> Result<(), BillingError> {
-        let Some(cap) = self.caps.get(api_key_id) else { return Ok(()); };
-        let month = current_month();
-        if let Some(usage) = self.monthly.get(&format!("{api_key_id}:{month}")) {
-            if usage.tokens_in + usage.tokens_out + estimated_tokens > cap.monthly_tokens {
-                return Err(BillingError::CapExceeded(
-                    format!("monthly token cap {} exceeded", cap.monthly_tokens)
-                ));
-            }
-            if usage.requests_count >= cap.monthly_requests {
-                return Err(BillingError::CapExceeded(
-                    format!("monthly request cap {} exceeded", cap.monthly_requests)
-                ));
-            }
-        }
+    pub fn check_cap(&self, api_key_id: &str, _estimated_tokens: u64) -> Result<(), BillingError> {
+        let Some(_cap) = self.caps.get(api_key_id) else { return Ok(()); };
+        // Legacy stub — full enforcement via UsageCap::check() added in Task 3.
+        // This method is replaced entirely in Task 5.
         Ok(())
     }
 

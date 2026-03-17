@@ -1,7 +1,7 @@
 pub mod pricing;
 mod client;
 pub mod meter;
-mod cap;
+pub mod cap;
 mod invoice;
 
 pub use client::BillingClient;
