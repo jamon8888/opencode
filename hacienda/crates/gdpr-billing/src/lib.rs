@@ -1,3 +1,4 @@
+pub mod pricing;
 mod client;
 mod meter;
 mod cap;
