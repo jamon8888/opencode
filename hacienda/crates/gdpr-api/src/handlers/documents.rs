@@ -223,9 +223,40 @@ pub async fn get_document(
 }
 
 pub async fn delete_document(
-    State(_state): State<AppState>,
-    Path(_id): Path<String>,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
 ) -> ApiResult<StatusCode> {
+    let conn = state.db.get().await
+        .map_err(|e| ApiError::Internal(format!("db pool: {e}")))?;
+
+    let id_clone = id.clone();
+    let deleted = conn.interact(move |c| {
+        // Check existence
+        let count: i64 = c.query_row(
+            "SELECT COUNT(*) FROM documents WHERE id = ?1", [&id_clone], |r| r.get(0)
+        )?;
+        if count == 0 {
+            return Ok::<_, rusqlite::Error>(false);
+        }
+        // Delete child rows first, then parent
+        c.execute("DELETE FROM doc_chunks    WHERE doc_id      = ?1", [&id_clone])?;
+        c.execute("DELETE FROM doc_entity_map WHERE document_id = ?1", [&id_clone])?;
+        c.execute("DELETE FROM documents     WHERE id           = ?1", [&id_clone])?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("interact: {e}")))?
+    .map_err(|e| ApiError::Internal(format!("sqlite: {e}")))?;
+
+    if !deleted {
+        return Err(ApiError::NotFound(format!("document not found: {id}")));
+    }
+
+    // Delete from VecStore if enabled (best-effort)
+    if state.vec_store.is_some() {
+        tracing::debug!(doc_id = %id, "VecStore deletion: not yet implemented (T6)");
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -305,6 +336,47 @@ mod tests {
             c.query_row("SELECT COUNT(*) FROM documents WHERE id = ?1", [&resp.doc_id], |r| r.get(0))
         }).await.unwrap().unwrap();
         assert_eq!(count, 1, "document must be persisted");
+    }
+
+    #[tokio::test]
+    async fn test_delete_document_returns_204_and_removes_rows() {
+        let state = test_state().await;
+        // Pre-insert
+        {
+            let conn = state.db.get().await.unwrap();
+            conn.interact(|c| {
+                c.execute("INSERT INTO documents (id, anon_text, pii_count, ner_degraded, created_at) VALUES ('doc2','anon',1,0,1710000000)", [])?;
+                c.execute("INSERT INTO doc_chunks (id, doc_id, chunk_idx, chunk_text, chunk_offset, created_at) VALUES ('chunk1','doc2',0,'text',0,1710000000)", [])?;
+                c.execute("INSERT INTO doc_entity_map (document_id, entity_type, pseudonym, detection_layer, confidence, ner_degraded) VALUES ('doc2','PERSON','P1','L1',0.9,0)", [])?;
+                Ok::<_, rusqlite::Error>(())
+            }).await.unwrap().unwrap();
+        }
+        let status = delete_document(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("doc2".to_string()),
+        ).await.unwrap();
+        assert_eq!(status, axum::http::StatusCode::NO_CONTENT);
+
+        // Verify rows deleted
+        let conn = state.db.get().await.unwrap();
+        let count: i64 = conn.interact(|c| {
+            c.query_row("SELECT COUNT(*) FROM documents WHERE id='doc2'", [], |r| r.get(0))
+        }).await.unwrap().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_document_404_when_missing() {
+        let state = test_state().await;
+        let result = delete_document(
+            axum::extract::State(state),
+            axum::extract::Path("nonexistent".to_string()),
+        ).await;
+        match result {
+            Err(crate::error::ApiError::NotFound(_)) => {}
+            Ok(s) => panic!("expected 404, got {}", s),
+            Err(e) => panic!("unexpected error: {e:?}"),
+        }
     }
 
     #[tokio::test]
