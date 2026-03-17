@@ -116,6 +116,14 @@ async fn main() -> Result<()> {
         .connect_timeout(Duration::from_secs(10))
         .build()?;
 
+    // Billing: dedicated gdpr-core ClickHouseClient with write_batch_table support
+    let billing_ch = std::sync::Arc::new(gdpr_core::clients::ClickHouseClient::new(
+        &std::env::var("CLICKHOUSE_URL").unwrap_or_else(|_| "http://localhost:8123".to_string())
+    ));
+    let meter = std::sync::Arc::new(gdpr_billing::Meter::new(billing_ch));
+    let snapshot_cache: std::sync::Arc<dashmap::DashMap<String, (gdpr_billing::BillingSnapshot, std::time::Instant)>>
+        = std::sync::Arc::new(dashmap::DashMap::new());
+
     let state = AppState {
         db: api_pool,
         keys: Arc::new(dashmap::DashMap::new()),
@@ -131,7 +139,34 @@ async fn main() -> Result<()> {
         tensorzero_base_url: upstream_url,
         tensorzero_key,
         jwt_secret,
+        meter,
+        snapshot_cache,
     };
+
+    // Background: refresh billing snapshots from ClickHouse every 60 seconds
+    {
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                let period_ym = gdpr_billing::BillingSnapshot::current_period_ym();
+                let tenant_ids: Vec<String> = state_clone.snapshot_cache
+                    .iter()
+                    .map(|e| e.key().clone())
+                    .collect();
+                for tenant_id in tenant_ids {
+                    if let Some(ch) = &state_clone.clickhouse {
+                        if let Ok(snap) = query_billing_snapshot(ch, &tenant_id, period_ym).await {
+                            state_clone.snapshot_cache.insert(
+                                tenant_id,
+                                (snap, std::time::Instant::now()),
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     let app  = router::build(state);
     let addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8443".to_string());
@@ -178,4 +213,48 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Query the `billing_snapshots` ClickHouse table for a specific tenant + period.
+/// Uses the gdpr-api ClickHouseClient's exposed HTTP client and base_url.
+pub async fn query_billing_snapshot(
+    ch: &std::sync::Arc<crate::clients::ClickHouseClient>,
+    tenant_id: &str,
+    period_ym: u32,
+) -> anyhow::Result<gdpr_billing::BillingSnapshot> {
+    // Sanitize tenant_id to prevent injection
+    let safe_tenant = tenant_id.replace('\'', "''");
+    let query = format!(
+        "SELECT total_docs, total_chars_in, total_rag_queries, total_ai_tokens_in, total_ai_tokens_out \
+         FROM billing_snapshots FINAL \
+         WHERE tenant_id='{}' AND period_ym={} LIMIT 1 FORMAT TabSeparated",
+        safe_tenant, period_ym
+    );
+    let url = format!(
+        "{}/?query={}",
+        ch.base_url().trim_end_matches('/'),
+        urlencoding::encode(&query)
+    );
+    let resp = ch.http_client()
+        .get(&url)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "ClickHouse query failed: {} — {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
+    }
+    let text = resp.text().await?;
+    let parts: Vec<&str> = text.trim().split('\t').collect();
+    Ok(gdpr_billing::BillingSnapshot {
+        tenant_id: tenant_id.to_string(),
+        period_ym,
+        total_docs:          parts.first().and_then(|s| s.parse().ok()).unwrap_or(0),
+        total_chars_in:      parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
+        total_rag_queries:   parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
+        total_ai_tokens_in:  parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
+        total_ai_tokens_out: parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
+    })
 }
