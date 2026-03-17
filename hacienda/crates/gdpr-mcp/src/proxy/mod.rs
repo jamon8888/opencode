@@ -145,7 +145,16 @@ pub async fn chat_completions(
                     .splitn(raw_texts.len(), "\n---\n")
                     .map(|s| s.to_string())
                     .collect();
-                write_text_slots(&mut req.messages, &cleaned, &slots);
+                if cleaned.len() != raw_texts.len() {
+                    tracing::error!(
+                        expected = raw_texts.len(), got = cleaned.len(),
+                        "anonymize segment count mismatch — blocking request to prevent PII leak"
+                    );
+                    let fallback = vec!["[PII_DETECTION_ERROR: content blocked]".to_string(); raw_texts.len()];
+                    write_text_slots(&mut req.messages, &fallback, &slots);
+                } else {
+                    write_text_slots(&mut req.messages, &cleaned, &slots);
+                }
             }
             Err(e) => {
                 tracing::error!(error = %e, "gdpr-api anonymize failed — blocking request");
@@ -207,7 +216,7 @@ pub async fn chat_completions(
                             }).await {
                                 Ok(r) => r.text,
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "deanonymize failed — returning anonymized text");
+                                    tracing::warn!(error = %e, session_id = %sid, "deanonymize failed — returning anonymized text");
                                     body_str
                                 }
                             }
@@ -244,7 +253,7 @@ pub async fn chat_completions(
                             }).await {
                                 Ok(r) => r.text,
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "deanonymize failed — returning anonymized text");
+                                    tracing::warn!(error = %e, session_id = %sid, "deanonymize failed — returning anonymized text");
                                     body_str
                                 }
                             }
