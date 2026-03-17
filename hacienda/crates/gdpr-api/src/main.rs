@@ -57,6 +57,33 @@ async fn main() -> Result<()> {
                     month       TEXT NOT NULL,
                     created_at  INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS documents (
+                    id           TEXT PRIMARY KEY,
+                    anon_text    TEXT NOT NULL,
+                    pii_count    INTEGER NOT NULL,
+                    ner_degraded INTEGER NOT NULL,
+                    created_at   INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS doc_chunks (
+                    id           TEXT PRIMARY KEY,
+                    doc_id       TEXT NOT NULL,
+                    chunk_idx    INTEGER NOT NULL,
+                    chunk_text   TEXT NOT NULL,
+                    chunk_offset INTEGER NOT NULL,
+                    created_at   INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS doc_entity_map (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id     TEXT NOT NULL,
+                    entity_type     TEXT NOT NULL,
+                    pseudonym       TEXT NOT NULL,
+                    detection_layer TEXT NOT NULL,
+                    confidence      REAL,
+                    ner_degraded    INTEGER NOT NULL DEFAULT 0,
+                    created_at      INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_dem_doc_id ON doc_entity_map(document_id);
+                CREATE INDEX IF NOT EXISTS idx_dc_doc_id  ON doc_chunks(doc_id);
             ",
             )?;
             Ok::<_, rusqlite::Error>(())
