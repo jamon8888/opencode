@@ -27,8 +27,6 @@ pub struct SearchParams {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AuditParams {
-    /// Filter audit log by document ID (optional).
-    pub doc_id: Option<String>,
     /// Maximum number of audit records to return (default: 50).
     pub limit: Option<u32>,
 }
