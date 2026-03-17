@@ -30,3 +30,8 @@ dashmap            = { workspace = true }
 regex              = { workspace = true }
 rusqlite           = { workspace = true }
 cloakpipe-core     = { workspace = true }
+thiserror          = { workspace = true }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio    = { workspace = true, features = ["macros", "rt-multi-thread"] }
