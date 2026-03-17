@@ -31,9 +31,15 @@ pub struct IngestResp {
 }
 
 #[derive(Serialize)]
+pub struct DocEntry {
+    pub doc_id:       String,
+    pub created_at:   i64,
+    pub entity_count: usize,
+}
+
+#[derive(Serialize)]
 pub struct DocList {
-    pub items: Vec<serde_json::Value>,
-    pub total: usize,
+    pub documents: Vec<DocEntry>,
 }
 
 pub async fn post_document(
@@ -179,9 +185,35 @@ pub async fn post_document(
 }
 
 pub async fn list_documents(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> ApiResult<Json<DocList>> {
-    Ok(Json(DocList { items: vec![], total: 0 }))
+    let conn = state.db.get().await
+        .map_err(|e| ApiError::Internal(format!("db pool: {e}")))?;
+
+    let rows = conn.interact(|c| {
+        let mut stmt = c.prepare(
+            "SELECT d.id AS doc_id, d.created_at, COUNT(e.document_id) AS entity_count
+             FROM documents d
+             LEFT JOIN doc_entity_map e ON d.id = e.document_id
+             GROUP BY d.id
+             ORDER BY d.created_at DESC"
+        )?;
+        let entries: Vec<DocEntry> = stmt.query_map([], |row| {
+            Ok(DocEntry {
+                doc_id:       row.get::<_, String>(0)?,
+                created_at:   row.get::<_, i64>(1)?,
+                entity_count: row.get::<_, i64>(2)? as usize,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+        Ok::<_, rusqlite::Error>(entries)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("interact: {e}")))?
+    .map_err(|e| ApiError::Internal(format!("sqlite: {e}")))?;
+
+    Ok(Json(DocList { documents: rows }))
 }
 
 pub async fn get_document(
@@ -274,5 +306,34 @@ mod tests {
             c.query_row("SELECT COUNT(*) FROM documents WHERE id = ?1", [&resp.doc_id], |r| r.get(0))
         }).await.unwrap().unwrap();
         assert_eq!(count, 1, "document must be persisted");
+    }
+
+    #[tokio::test]
+    async fn test_list_documents_returns_typed_entries() {
+        let state = test_state().await;
+        // Pre-insert a document and entity
+        {
+            let conn = state.db.get().await.unwrap();
+            conn.interact(|c| {
+                c.execute(
+                    "INSERT INTO documents (id, anon_text, pii_count, ner_degraded, created_at) VALUES ('doc1','anon',3,0,1710000000)",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO doc_entity_map (document_id, entity_type, pseudonym, detection_layer, confidence, ner_degraded) VALUES ('doc1','PERSON','PERSON_1','L1',0.99,0)",
+                    [],
+                )?;
+                c.execute(
+                    "INSERT INTO doc_entity_map (document_id, entity_type, pseudonym, detection_layer, confidence, ner_degraded) VALUES ('doc1','EMAIL','EMAIL_1','L1',0.99,0)",
+                    [],
+                )?;
+                Ok::<_, rusqlite::Error>(())
+            }).await.unwrap().unwrap();
+        }
+        let Json(resp) = list_documents(axum::extract::State(state)).await.unwrap();
+        assert_eq!(resp.documents.len(), 1);
+        assert_eq!(resp.documents[0].doc_id, "doc1");
+        assert_eq!(resp.documents[0].entity_count, 2);
+        assert_eq!(resp.documents[0].created_at, 1710000000);
     }
 }
