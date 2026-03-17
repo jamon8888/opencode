@@ -205,8 +205,7 @@ pub async fn list_documents(
                 entity_count: row.get::<_, i64>(2)? as usize,
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
         Ok::<_, rusqlite::Error>(entries)
     })
     .await
