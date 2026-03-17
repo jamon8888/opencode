@@ -8,22 +8,24 @@ use axum::{routing::post, Router};
 use rmcp::service::ServiceExt;
 use rmcp::transport::io::stdio;
 
+use api_client::ApiClient;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr) // keep stdout clean for MCP stdio transport
+        .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("gdpr-mcp starting");
+    tracing::info!("gdpr-mcp starting (T5 thin client)");
 
-    // Build ApiClient (thin-client: calls gdpr-api over HTTP) — T5
-    let api_client = Arc::new(api_client::ApiClient::from_env());
+    // T5: read gdpr-api coordinates — panic with clear message if missing
+    let api_client = Arc::new(ApiClient::from_env());
 
     // MCP server
     let mcp_server = mcp::GdprServer::new(Arc::clone(&api_client));
 
-    // HTTP anonymization proxy (:8080) — T10: uses ApiClient (thin-client)
+    // HTTP anonymization proxy (:8080)
     let proxy_addr = std::env::var("PROXY_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
@@ -44,18 +46,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&proxy_addr).await?;
     tracing::info!(%proxy_addr, "anonymization proxy listening");
 
-    // MCP stdio server
     tracing::info!("gdpr-mcp ready — listening on stdio");
     let running = mcp_server.serve(stdio()).await?;
 
-    // Run both concurrently — select! exits when either finishes
     tokio::select! {
-        result = axum::serve(listener, app) => {
-            result?;
-        }
-        result = running.waiting() => {
-            result?;
-        }
+        result = axum::serve(listener, app) => { result?; }
+        result = running.waiting() => { result?; }
     }
 
     Ok(())
