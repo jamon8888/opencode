@@ -36,12 +36,7 @@ WORKDIR /app
 
 COPY --from=builder /workspace/target/release/gdpr-mcp ./gdpr-mcp
 
-RUN mkdir -p /data /models
-
 ENV PROXY_ADDR=0.0.0.0:8080 \
-    GDPR_DB_PATH=/data/gdpr_docs.db \
-    GDPR_VAULT_PATH=/data/gdpr_vault.db \
-    GLINER_MODEL_DIR=/models/gliner-pii-edge \
     RUST_LOG=info
 
 EXPOSE 8080

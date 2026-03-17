@@ -225,6 +225,11 @@ pub async fn chat_completions(
                         };
                         let mut r = Response::new(Body::from(rehydrated));
                         *r.status_mut() = status;
+                        // Override SSE content-type: body is now a buffered blob, not a stream
+                        r.headers_mut().insert(
+                            axum::http::header::CONTENT_TYPE,
+                            HeaderValue::from_static("application/json"),
+                        );
                         r
                     }
                     Err(e) => {

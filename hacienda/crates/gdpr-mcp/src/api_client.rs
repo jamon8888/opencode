@@ -365,6 +365,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("DELETE"))
             .and(path("/v1/documents/missing-id"))
+            .and(wiremock::matchers::header("Authorization", "Bearer test-key"))
             .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
                 "type": "about:blank",
                 "title": "Not Found",
