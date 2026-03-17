@@ -10,7 +10,8 @@ use axum::response::{IntoResponse, Response};
 use tower::{Layer, Service};
 
 use crate::error::ApiError;
-use crate::state::{AppState, AuthContext, CachedKey, Plan};
+use crate::state::{AppState, AuthContext, CachedKey};
+use gdpr_billing::Plan;
 
 // ── Layer ────────────────────────────────────────────────────────────────────
 
@@ -169,22 +170,23 @@ async fn authenticate_api_key(token: &str, state: &AppState) -> Result<AuthConte
     let row = conn
         .interact(move |c| {
             let mut stmt = c.prepare(
-                "SELECT id, name, key_hash, revoked FROM api_keys",
+                "SELECT id, name, key_hash, revoked, COALESCE(plan, 'starter') AS plan FROM api_keys",
             )?;
-            let rows: Vec<(String, String, String, i32)> = stmt
+            let rows: Vec<(String, String, String, i32, String)> = stmt
                 .query_map([], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, i32>(3)?,
+                        row.get::<_, String>(4)?,
                     ))
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
 
             // Try to verify against each key hash
-            for (id, name, key_hash, revoked) in &rows {
+            for (id, name, key_hash, revoked, plan_str) in &rows {
                 use argon2::password_hash::PasswordHash;
                 use argon2::{Argon2, PasswordVerifier};
                 if let Ok(parsed) = PasswordHash::new(key_hash) {
@@ -197,6 +199,7 @@ async fn authenticate_api_key(token: &str, state: &AppState) -> Result<AuthConte
                             name.clone(),
                             key_hash.clone(),
                             *revoked,
+                            plan_str.clone(),
                         )));
                     }
                 }
@@ -213,7 +216,7 @@ async fn authenticate_api_key(token: &str, state: &AppState) -> Result<AuthConte
             ApiError::Database(e.to_string())
         })?;
 
-    let (id, _name, key_hash, revoked) = match row {
+    let (id, _name, key_hash, revoked, plan_str) = match row {
         Some(r) => r,
         None => return Err(ApiError::Unauthorized),
     };
@@ -228,7 +231,7 @@ async fn authenticate_api_key(token: &str, state: &AppState) -> Result<AuthConte
         api_key_id: id.clone(),
         key_hash,
         scopes: vec!["*".into()],
-        plan: Plan::Starter,
+        plan: parse_plan(&plan_str),
         is_active: true,
         expires_at: None,
         cached_at: now,
@@ -242,7 +245,7 @@ async fn authenticate_api_key(token: &str, state: &AppState) -> Result<AuthConte
         tenant_id: id.clone(),
         api_key_id: id,
         scopes: vec!["*".into()],
-        plan: Plan::Starter,
+        plan: parse_plan(&plan_str),
     })
 }
 
@@ -258,6 +261,14 @@ fn extract_key_prefix(token: &str) -> Option<&str> {
         return None;
     }
     Some(&after_env[..end])
+}
+
+fn parse_plan(s: &str) -> Plan {
+    match s {
+        "business"   => Plan::Business,
+        "enterprise" => Plan::Enterprise,
+        _            => Plan::Starter,
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
