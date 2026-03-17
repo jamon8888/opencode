@@ -62,9 +62,17 @@ Five gdpr-api handlers are currently stubs and must be real before gdpr-mcp can 
 
 **`file_path` input:** Not supported in T5. If the caller supplies a `file_path` field instead of `text`, the API returns HTTP 400 with `detail: "file_path upload not supported; provide text directly"`. The MCP thin client propagates this as a tool error without special-casing it.
 
+**Change `IngestReq.legal_basis` to required:** The existing stub has `legal_basis: Option<String>`. Change it to `legal_basis: String` (non-optional) to match the anonymize handler's requirement. Add `#[validate(length(min = 1))]` attribute consistent with other request structs. If the caller omits `legal_basis`, the API returns 400 from the validator before the handler body runs.
+
 **Implementation:**
 1. Use the `text` field directly (no kreuzberg for T5 — text-only ingest)
-2. Anonymize via `gdpr_core::pii::anonymize_with_profile(&state.engine_pool, &text, &profile)` — use the same code path as the existing `POST /v1/anonymize` handler to ensure consistent token formats between ingest and the anonymize endpoint.
+2. Anonymize using the same code path as the existing `POST /v1/anonymize` handler. This requires constructing a `SessionContext` and `TreatmentEngine` before calling `anonymize_with_profile`. Follow the pattern in `handlers/anonymize.rs` `post_anonymize` exactly:
+   ```rust
+   let mut session_ctx = SessionContext::new(session_id, legal_basis.clone());
+   let engine = TreatmentEngine::from_pool(&state.engine_pool, &profile);
+   let result = gdpr_core::pii::anonymize_with_profile(&text, &profile, &mut session_ctx, &engine)?;
+   ```
+   Store the resulting `session_ctx` (which holds token map) into `state.session_cache` under the generated `session_id`, consistent with how `post_anonymize` does it.
 3. Chunk with `chunk_text` from gdpr-core using **400-word chunks with 50-word overlap** (matching existing MCP server constants)
 4. Store in SQLite:
    - Insert into `documents` table
@@ -425,6 +433,9 @@ The proxy's HTTP server on `:8080`, the slot collection/rehydration logic (`coll
 
 - Remove `CoreState` construction (engine pool loading, SQLite open, VecStore init)
 - Remove `CLOAKPIPE_VAULT_KEY` startup check
+- Remove the `session_cache` local variable (`Arc<DashMap<...>>`)
+- Remove the session GC `tokio::spawn` block that references `session_cache` and `proxy::SessionCache`
+- Remove the `session_cache: Arc::clone(&session_cache)` field from `ProxyState` construction
 - Add: `let api_client = Arc::new(ApiClient::from_env());`
 - Pass `api_client` into both `McpState` and `ProxyState`
 
