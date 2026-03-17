@@ -2,9 +2,9 @@ pub mod pricing;
 mod client;
 pub mod meter;
 pub mod cap;
-mod invoice;
+pub mod invoice;
 
 pub use client::BillingClient;
 pub use cap::{UsageCap, BillingError};
 pub use meter::{EventType, NerTier, UsageEvent, MeteringRecord, Meter};
-pub use invoice::Invoice;
+pub use invoice::{Invoice, LineItem};
