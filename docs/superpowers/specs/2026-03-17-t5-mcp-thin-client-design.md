@@ -64,12 +64,16 @@ Five gdpr-api handlers are currently stubs and must be real before gdpr-mcp can 
 
 **Implementation:**
 1. Use the `text` field directly (no kreuzberg for T5 — text-only ingest)
-2. Run `EnginePool::anonymize_batch` via `state.engine_pool`
+2. Anonymize via `gdpr_core::pii::anonymize_with_profile(&state.engine_pool, &text, &profile)` — use the same code path as the existing `POST /v1/anonymize` handler to ensure consistent token formats between ingest and the anonymize endpoint.
 3. Chunk with `chunk_text` from gdpr-core using **400-word chunks with 50-word overlap** (matching existing MCP server constants)
 4. Store in SQLite:
    - Insert into `documents` table
    - Insert each chunk into `doc_chunks` table
-   - Insert each detected entity into `doc_entity_map` via direct SQLite `INSERT INTO doc_entity_map (doc_id, entity_type, token) VALUES (?, ?, ?)` — no `DocAudit` helper exists in `AppState`
+   - Insert each detected entity into `doc_entity_map`. The full table schema (from `config/clickhouse/init.sql` and CoreState migrations) is:
+     ```sql
+     INSERT INTO doc_entity_map (doc_id, entity_type, token, confidence, pseudonym) VALUES (?, ?, ?, ?, ?)
+     ```
+     Fields: `doc_id TEXT`, `entity_type TEXT`, `token TEXT` (original), `confidence REAL` (0.0–1.0), `pseudonym TEXT` (replacement token). No `DocAudit` helper exists in `AppState`; use `state.db.execute(...)` directly.
 5. Write ClickHouse audit trail
 6. Return full response
 
@@ -104,6 +108,15 @@ pub struct DocEntry {
 pub struct DocList {
     pub documents: Vec<DocEntry>,
 }
+```
+
+**SQL query:** The `documents` table uses `id` as the primary key column, not `doc_id`. Use an alias:
+```sql
+SELECT d.id AS doc_id, d.created_at, COUNT(e.doc_id) AS entity_count
+FROM documents d
+LEFT JOIN doc_entity_map e ON d.id = e.doc_id
+GROUP BY d.id
+ORDER BY d.created_at DESC
 ```
 
 **Response:**
@@ -143,6 +156,16 @@ pub struct DocList {
 - `limit` (optional, default 50): maximum documents to return
 
 **Implementation:** Query `doc_entity_map` grouped by `doc_id`, joined with `documents` for `created_at`, filter by entity count ≥ threshold, order descending by entity count, return up to limit.
+
+**ReviewQueueQuery struct** (add to `audit.rs`):
+```rust
+#[derive(Deserialize)]
+pub struct ReviewQueueQuery {
+    pub threshold: Option<u32>,
+    pub limit:     Option<u32>,
+}
+```
+The handler signature becomes: `pub async fn get_review_queue(State(state): State<AppState>, Query(params): Query<ReviewQueueQuery>) -> ApiResult<Json<ReviewQueueResp>>`
 
 **Struct changes:** The existing stub returns `{"items": [], "total": 0}`. Replace with a typed response:
 ```rust
@@ -222,7 +245,7 @@ pub struct AnonymizeRequest {
 pub struct AnonymizeResponse {
     pub anonymized_text: String,
     pub session_id: String,
-    pub tokens_replaced: usize,
+    pub pii_count: usize,             // actual field in gdpr-api AnonymizeResponse
 }
 
 // --- Deanonymize ---
@@ -284,16 +307,16 @@ pub struct SearchResponse {
 }
 
 // --- Audit ---
+// Field names match actual gdpr-api AuditEvent serialization (audit.rs)
 #[derive(Deserialize)]
 pub struct AuditEntry {
-    pub id: String,
+    pub document_id: String,
     pub action: String,
-    pub created_at: i64,
-    // additional fields passed through as-is
+    pub ts_unix: u64,
 }
 #[derive(Deserialize)]
 pub struct AuditResponse {
-    pub entries: Vec<AuditEntry>,
+    pub events: Vec<AuditEntry>,  // top-level key is "events" in gdpr-api response
 }
 
 // --- Review Queue ---
@@ -382,6 +405,16 @@ api_client.deanonymize(DeanonymizeRequest {
 
 **Session ID threading:** The gdpr-api anonymize endpoint returns a `session_id` in the response. The proxy must store this `session_id` as a local variable and pass it as `DeanonymizeRequest.session_id`. Without it, gdpr-api cannot look up the token map and deanonymization returns the text unchanged (silent data corruption). The session_id is a local variable within the single async request handler — no shared state is needed.
 
+**SSE streaming path after T5:** The current proxy uses an in-memory local token map for per-chunk token replacement during SSE streaming. After T5 this local map is gone. The new behavior:
+1. The proxy anonymizes the request text (unchanged — happens before TensorZero forward)
+2. The proxy forwards to TensorZero and **buffers the complete SSE response** (collect all `data:` events into a single string)
+3. The proxy calls `api_client.deanonymize` once on the buffered text with `session_id` from step 1
+4. The proxy returns the deanonymized result as a single non-streaming HTTP response to the chat client
+
+This means after T5 the proxy **no longer streams responses back** — it buffers and returns. The TensorZero-side SSE streaming is still used (to get the full response without timeout), but the client-facing response is non-streaming. This is a deliberate T5 trade-off; streaming passthrough with API-side deanonymization is deferred to T6+.
+
+The existing `rehydrate_from_cache` function and `write_text_slots` usage in the SSE path are replaced by the single `api_client.deanonymize` call after buffering.
+
 **Remove `ProxyState.session_cache`:** The existing `DashMap`-backed session cache in `ProxyState` stored in-process token maps. After T5, token maps are owned by gdpr-api. The `ProxyState.session_cache` field and the `SessionCache` struct are **removed**. `dashmap` is no longer needed in gdpr-mcp.
 
 **`uuid` removal is correct:** The proxy previously generated session UUIDs locally (`uuid::Uuid::new_v4()`). After T5 the session_id comes from gdpr-api's anonymize response. No new UUIDs are generated in gdpr-mcp, so `uuid` can be removed.
@@ -414,7 +447,12 @@ The proxy's HTTP server on `:8080`, the slot collection/rehydration logic (`coll
 - `tokio`, `serde`, `serde_json`, `tracing`
 - `axum` (proxy HTTP server on :8080)
 - `schemars` (MCP param struct JSON schemas — `#[derive(JsonSchema)]` stays)
-- `thiserror` (used by `ApiError`)
+- `futures-util` (proxy SSE streaming: `StreamExt` in `proxy/mod.rs`)
+- `tokio-stream` (proxy SSE streaming: event streaming in `proxy/mod.rs`)
+- `regex` (proxy token rehydration: `TOKEN_RE` pattern in `proxy/mod.rs`)
+
+**Add (not currently in `gdpr-mcp/Cargo.toml`):**
+- `thiserror` (new dep, needed for `ApiError` — was not previously in gdpr-mcp)
 
 **Add to `[dev-dependencies]`:**
 - `wiremock = "0.6"` (mock HTTP server for ApiClient unit tests)
@@ -426,7 +464,7 @@ The proxy's HTTP server on `:8080`, the slot collection/rehydration logic (`coll
 | `GDPR_API_URL` or `GDPR_API_KEY` missing at startup | panic: `"T5: GDPR_API_URL must be set"` |
 | gdpr-api returns 4xx | MCP tool error with `detail` field from API response |
 | gdpr-api returns 404 on delete | MCP tool error: `"Document not found: <id>"` |
-| gdpr-api returns 5xx or network failure | MCP tool error: `"gdpr-api unavailable: <reason>"` |
+| gdpr-api returns 5xx or network failure | MCP tool error: `"gdpr-api unavailable: <reason>"` where `<reason>` is the `detail` field from the ProblemDetail body (e.g. `"An internal error occurred"` — gdpr-api intentionally scrubs internal details from 5xx; full reason is in gdpr-api server logs) |
 | reqwest timeout (30s) | MCP tool error: `"gdpr-api unavailable: request timed out after 30s"` |
 | Proxy anonymize/deanonymize call fails | HTTP 502 to chat client |
 | `gdpr_ingest` with `file_path` | Tool error: `"file_path upload not supported; provide text directly"` |
