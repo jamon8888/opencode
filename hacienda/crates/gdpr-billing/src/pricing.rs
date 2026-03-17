@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize};
 
 // ── Plan ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Plan {
-    #[default]
     Starter,
     Business,
     Enterprise,
