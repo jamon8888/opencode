@@ -13,6 +13,7 @@ ocr     = ["gdpr-core/ocr"]
 
 [dependencies]
 gdpr-core          = { path = "../gdpr-core" }
+gdpr-billing       = { path = "../gdpr-billing" }
 tokio              = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }

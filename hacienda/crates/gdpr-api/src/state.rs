@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use dashmap::DashMap;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+pub use gdpr_billing::{Plan, BillingSnapshot};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -22,6 +22,8 @@ pub struct AppState {
     pub tensorzero_base_url: String,
     pub tensorzero_key:      String,
     pub jwt_secret:          String,
+    pub meter:               std::sync::Arc<gdpr_billing::Meter>,
+    pub snapshot_cache:      std::sync::Arc<dashmap::DashMap<String, (BillingSnapshot, Instant)>>,
 }
 
 #[derive(Clone, Debug)]
@@ -46,37 +48,6 @@ pub struct CachedKey {
     pub is_active:  bool,
     pub expires_at: Option<i64>,
     pub cached_at:  i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Plan {
-    Starter,
-    Business,
-    Enterprise,
-}
-
-impl Plan {
-    pub fn rate_limit_rpm(&self) -> u32 {
-        match self {
-            Plan::Starter    => 60,
-            Plan::Business   => 300,
-            Plan::Enterprise => 1000,
-        }
-    }
-    pub fn max_concurrent(&self) -> usize {
-        match self {
-            Plan::Starter    => 5,
-            Plan::Business   => 20,
-            Plan::Enterprise => 100,
-        }
-    }
-}
-
-impl Default for Plan {
-    fn default() -> Self {
-        Plan::Starter
-    }
 }
 
 #[derive(Debug, Clone)]
