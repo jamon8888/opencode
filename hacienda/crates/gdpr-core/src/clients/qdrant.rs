@@ -340,6 +340,29 @@ impl QdrantStore {
         Ok(hits)
     }
 
+    /// Delete all Qdrant points for a given `doc_id` and `tenant_id` using payload filter.
+    /// This correctly targets the UUID-v5-keyed points created by `upsert_chunks_tenant`.
+    pub async fn delete_chunks_tenant(
+        &self,
+        doc_id:    &str,
+        tenant_id: &str,
+    ) -> anyhow::Result<()> {
+        self.client
+            .post(format!("{}/collections/{}/points/delete", self.url, self.collection))
+            .json(&serde_json::json!({
+                "filter": {
+                    "must": [
+                        { "key": "doc_id",    "match": { "value": doc_id } },
+                        { "key": "tenant_id", "match": { "value": tenant_id } },
+                    ]
+                }
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     /// Delete Qdrant points by explicit point IDs (chunk UUIDs).
     pub async fn delete_by_ids(&self, ids: &[String]) -> Result<()> {
         if ids.is_empty() {

@@ -256,11 +256,12 @@ pub async fn delete_document(
 
     // Fire-and-forget Qdrant delete
     if let Some(ref q) = state.qdrant {
-        let q    = Arc::clone(q);
-        let id3  = id.clone();
+        let q          = Arc::clone(q);
+        let doc_id3    = id.clone();
+        let tenant_id3 = auth.tenant_id.clone();
         tokio::spawn(async move {
-            if let Err(e) = q.delete(&id3).await {
-                tracing::warn!(error = %e, doc_id = %id3, "qdrant delete failed");
+            if let Err(e) = q.delete_chunks_tenant(&doc_id3, &tenant_id3).await {
+                tracing::warn!(error = %e, doc_id = %doc_id3, "qdrant delete failed");
             }
         });
     }
