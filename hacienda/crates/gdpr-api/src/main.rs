@@ -57,6 +57,35 @@ async fn main() -> Result<()> {
                     month       TEXT NOT NULL,
                     created_at  INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS documents (
+                    id             TEXT PRIMARY KEY,
+                    original_text  TEXT NOT NULL,
+                    anonymized_text TEXT NOT NULL,
+                    created_at     TEXT NOT NULL,
+                    tenant_id      TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_docs_tenant ON documents(tenant_id);
+
+                CREATE TABLE IF NOT EXISTS doc_chunks (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id       TEXT NOT NULL,
+                    chunk_idx    INTEGER NOT NULL,
+                    chunk_text   TEXT NOT NULL,
+                    byte_offset  INTEGER NOT NULL DEFAULT 0,
+                    tenant_id    TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_chunks_tenant ON doc_chunks(tenant_id);
+
+                CREATE TABLE IF NOT EXISTS doc_entity_map (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    document_id   TEXT NOT NULL,
+                    entity_type   TEXT NOT NULL,
+                    original_value TEXT NOT NULL,
+                    pseudonym     TEXT NOT NULL,
+                    tenant_id     TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_dem_tenant ON doc_entity_map(tenant_id);
             ",
             )?;
             Ok::<_, rusqlite::Error>(())
@@ -77,6 +106,30 @@ async fn main() -> Result<()> {
             ).ok();
             Ok::<_, rusqlite::Error>(())
         }).await;
+    }
+    {
+        let conn3 = api_pool.get().await?;
+        conn3.interact(|c| {
+            let alter_stmts = [
+                "ALTER TABLE documents      ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE doc_chunks     ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE doc_entity_map ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
+                "CREATE INDEX IF NOT EXISTS idx_docs_tenant    ON documents(tenant_id)",
+                "CREATE INDEX IF NOT EXISTS idx_chunks_tenant  ON doc_chunks(tenant_id)",
+                "CREATE INDEX IF NOT EXISTS idx_dem_tenant     ON doc_entity_map(tenant_id)",
+            ];
+            for stmt in &alter_stmts {
+                if let Err(e) = c.execute(stmt, []) {
+                    if !e.to_string().contains("duplicate column name") {
+                        return Err(e);
+                    }
+                }
+            }
+            Ok::<_, rusqlite::Error>(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Migration error: {e}"))?
+        .map_err(|e| anyhow::anyhow!("Schema migration failed: {e}"))?;
     }
 
     let upstream_url = std::env::var("TENSORZERO_URL")
@@ -114,6 +167,9 @@ async fn main() -> Result<()> {
             .expect("ClickHouse reqwest client"))
     });
 
+    // Optional Qdrant vector store — skipped gracefully if QDRANT_URL not set
+    let qdrant = gdpr_core::clients::qdrant::QdrantStore::from_env();
+
     let tensorzero_key = std::env::var("TENSORZERO_API_KEY").unwrap_or_default();
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_default();
 
@@ -137,8 +193,7 @@ async fn main() -> Result<()> {
         session_cache,
         engine_pool,
         clickhouse,
-        // New T4 fields
-        vec_store: None,
+        qdrant,
         http_client,
         key_cache: Arc::new(dashmap::DashMap::new()),
         tensorzero_base_url: upstream_url,
