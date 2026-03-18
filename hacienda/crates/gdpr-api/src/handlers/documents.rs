@@ -244,22 +244,16 @@ pub async fn delete_document(
     let conn = state.db.get().await?;
 
     let deleted: bool = conn.interact(move |c| {
-        let exists: bool = c.query_row(
-            "SELECT id FROM documents WHERE id = ?1 AND tenant_id = ?2",
-            rusqlite::params![id2, tenant_id],
-            |_| Ok(true),
-        ).optional()?.unwrap_or(false);
-
-        if !exists {
-            return Ok(false);
-        }
-
         let tx = c.transaction()?;
+
+        // Delete children first, then parent — all within the same transaction.
+        // The final delete on `documents` tells us whether the doc existed for this tenant.
         tx.execute("DELETE FROM doc_chunks     WHERE doc_id      = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
         tx.execute("DELETE FROM doc_entity_map WHERE document_id = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
-        tx.execute("DELETE FROM documents      WHERE id          = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
+        let rows = tx.execute("DELETE FROM documents      WHERE id          = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
         tx.commit()?;
-        Ok::<_, rusqlite::Error>(true)
+
+        Ok::<_, rusqlite::Error>(rows > 0)
     })
     .await
     .map_err(|e| ApiError::Internal(format!("db interact: {e}")))?
