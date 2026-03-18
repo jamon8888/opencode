@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
                     id             TEXT PRIMARY KEY,
                     original_text  TEXT NOT NULL,
                     anonymized_text TEXT NOT NULL,
-                    created_at     TEXT NOT NULL,
+                    created_at     INTEGER NOT NULL,
                     tenant_id      TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_docs_tenant ON documents(tenant_id);
@@ -73,7 +73,8 @@ async fn main() -> Result<()> {
                     chunk_idx    INTEGER NOT NULL,
                     chunk_text   TEXT NOT NULL,
                     byte_offset  INTEGER NOT NULL DEFAULT 0,
-                    tenant_id    TEXT NOT NULL DEFAULT ''
+                    tenant_id    TEXT NOT NULL DEFAULT '',
+                    UNIQUE(doc_id, chunk_idx, tenant_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_chunks_tenant ON doc_chunks(tenant_id);
 
