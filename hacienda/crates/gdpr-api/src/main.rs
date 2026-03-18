@@ -122,6 +122,7 @@ async fn main() -> Result<()> {
                 "CREATE INDEX IF NOT EXISTS idx_chunks_tenant  ON doc_chunks(tenant_id)",
                 "CREATE INDEX IF NOT EXISTS idx_dem_tenant     ON doc_entity_map(tenant_id)",
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_dem_unique ON doc_entity_map(document_id, pseudonym, tenant_id)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_unique ON doc_chunks(doc_id, chunk_idx, tenant_id)",
             ];
             for stmt in &alter_stmts {
                 if let Err(e) = c.execute(stmt, []) {
@@ -174,6 +175,12 @@ async fn main() -> Result<()> {
 
     // Optional Qdrant vector store — skipped gracefully if QDRANT_URL not set
     let qdrant = gdpr_core::clients::qdrant::QdrantStore::from_env();
+    // Ensure Qdrant collection exists on startup — no-op if already created
+    if let Some(ref q) = qdrant {
+        if let Err(e) = q.ensure_collection().await {
+            tracing::warn!(error = %e, "Qdrant ensure_collection failed — RAG search may be unavailable");
+        }
+    }
 
     let tensorzero_key = std::env::var("TENSORZERO_API_KEY").unwrap_or_default();
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_default();
