@@ -93,7 +93,7 @@ pub async fn upsert_chunks_tenant(
     doc_id:    &str,
     tenant_id: &str,
     chunks:    &[(usize, String)],  // (chunk_idx, chunk_text)
-) -> Result<(), QdrantError>
+) -> anyhow::Result<()>
 ```
 
 **Point ID computation:**
@@ -132,7 +132,7 @@ pub async fn search_tenant(
     query:     &str,
     tenant_id: &str,
     limit:     u64,
-) -> Result<Vec<QdrantHit>, QdrantError>
+) -> anyhow::Result<Vec<QdrantHit>>
 ```
 
 **Filter sent to Qdrant** (`POST /collections/{collection}/points/search`):
@@ -242,8 +242,11 @@ pub struct IngestResp {
 // 1. Generate session_id
 let session_id = uuid::Uuid::new_v4().to_string();
 
-// 2. Call anonymize_with_profile (returns ProfileAnonymizeResult)
-let result = anonymize_with_profile(&text, &profile)?;
+// 2. Build session context and engine, then call anonymize_with_profile
+// Follow the exact pattern in handlers/anonymize.rs:62-78:
+//   let engine = state.engine_pool.get().await?;
+//   let mut session_ctx = SessionContext::new(profile.clone());
+//   let result = anonymize_with_profile(&text, profile, &mut session_ctx, &engine)?;
 
 // 3. Insert token_map into session_cache
 let sc = SessionCache {
@@ -279,7 +282,7 @@ if let Some(ref q) = state.qdrant {
     let doc_id2    = doc_id.clone();
     let tenant_id2 = auth.tenant_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = q.upsert_chunks_tenant(&doc_id2, &tenant_id2, chunks).await {
+        if let Err(e) = q.upsert_chunks_tenant(&doc_id2, &tenant_id2, &chunks).await {
             tracing::warn!(error = %e, doc_id = %doc_id2, "qdrant upsert failed");
         }
     });
