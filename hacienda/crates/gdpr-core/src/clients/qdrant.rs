@@ -328,23 +328,56 @@ mod tests {
 
     #[tokio::test]
     async fn test_upsert_chunks_tenant_point_ids_are_deterministic() {
-        let server = MockServer::start().await;
+        let server     = MockServer::start().await;
+        let emb_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "embedding": vec![0.1f32; 384] }]
+            })))
+            .expect(2)
+            .mount(&emb_server)
+            .await;
 
         Mock::given(method("PUT"))
             .and(path("/collections/test_col/points"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok", "result": {}})))
+            .expect(2)
             .mount(&server)
             .await;
 
-        let store = make_store(&server.uri());
-        let chunks: Vec<(usize, String)> = vec![(0, "Hello world".to_string())];
-        let id1 = Uuid::new_v5(&Uuid::NAMESPACE_URL, "tenant1/doc1/0".as_bytes());
-        let id2 = Uuid::new_v5(&Uuid::NAMESPACE_URL, "tenant1/doc1/0".as_bytes());
+        let store = QdrantStore {
+            client:     Client::new(),
+            url:        server.uri(),
+            collection: "test_col".to_string(),
+            embedding:  Some(Arc::new(EmbeddingClient::new(
+                format!("{}/", emb_server.uri()),
+                "test-model".to_string(),
+            ))),
+            dim: 384,
+        };
+
+        let chunks = vec![(0usize, "Hello world".to_string())];
+
+        // Call twice with identical inputs
+        store.upsert_chunks_tenant("doc1", "tenant1", &chunks).await.unwrap();
+        store.upsert_chunks_tenant("doc1", "tenant1", &chunks).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+
+        let body1: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let body2: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
+        let id1 = &body1["points"][0]["id"];
+        let id2 = &body2["points"][0]["id"];
+
+        // Same inputs must produce the same deterministic UUID v5
         assert_eq!(id1, id2);
 
-        // With no embedding client, upsert skips HTTP call and returns Ok
-        let result = store.upsert_chunks_tenant("doc1", "tenant1", &chunks).await;
-        assert!(result.is_ok());
+        // Verify it matches the expected UUID v5 formula
+        let expected = Uuid::new_v5(&Uuid::NAMESPACE_URL, "tenant1/doc1/0".as_bytes()).to_string();
+        assert_eq!(id1.as_str().unwrap(), expected);
     }
 
     #[tokio::test]
