@@ -46,7 +46,7 @@ pub async fn post_document(
     let doc_id     = uuid::Uuid::new_v4().to_string();
     let session_id = uuid::Uuid::new_v4().to_string();
     let text       = req.text;
-    let _legal_basis = req.legal_basis.unwrap_or_else(|| "legitimate_interest".to_string());
+    let legal_basis = req.legal_basis.unwrap_or_else(|| "legitimate_interest".to_string());
     let tenant_id  = auth.tenant_id.clone();
 
     // Parse profile
@@ -105,6 +105,7 @@ pub async fn post_document(
     let anonymized_text = result.text.clone();
     let original_text   = text.clone();
     let tenant_id2      = tenant_id.clone();
+    let legal_basis2    = legal_basis.clone();
     let pii_count       = result.pii_count;
     let ner_degraded    = result.ner_degraded;
     let ai_act_risk     = "low".to_string();
@@ -116,8 +117,8 @@ pub async fn post_document(
         let tx = c.transaction()?;
         let now = chrono::Utc::now().timestamp();
         tx.execute(
-            "INSERT INTO documents (id, original_text, anonymized_text, created_at, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![doc_id2, original_text, anonymized_text, now, tenant_id2],
+            "INSERT INTO documents (id, original_text, anonymized_text, created_at, tenant_id, legal_basis) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![doc_id2, original_text, anonymized_text, now, tenant_id2, legal_basis2],
         )?;
         for (idx, chunk_text, byte_offset) in &chunk_rows2 {
             tx.execute(
@@ -309,7 +310,8 @@ mod tests {
                 CREATE TABLE IF NOT EXISTS documents (
                     id TEXT PRIMARY KEY, original_text TEXT NOT NULL,
                     anonymized_text TEXT NOT NULL, created_at INTEGER NOT NULL,
-                    tenant_id TEXT NOT NULL DEFAULT ''
+                    tenant_id TEXT NOT NULL DEFAULT '',
+                    legal_basis TEXT NOT NULL DEFAULT 'legitimate_interest'
                 );
                 CREATE TABLE IF NOT EXISTS doc_chunks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, doc_id TEXT NOT NULL,
@@ -421,12 +423,12 @@ mod tests {
         let conn = state.db.get().await.unwrap();
         conn.interact(|c| {
             c.execute(
-                "INSERT INTO documents (id, original_text, anonymized_text, created_at, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["doc-a1", "orig", "anon", 1735689600i64, "tenant_a"],
+                "INSERT INTO documents (id, original_text, anonymized_text, created_at, tenant_id, legal_basis) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["doc-a1", "orig", "anon", 1735689600i64, "tenant_a", "consent"],
             )?;
             c.execute(
-                "INSERT INTO documents (id, original_text, anonymized_text, created_at, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["doc-b1", "orig", "anon", 1735689600i64, "tenant_b"],
+                "INSERT INTO documents (id, original_text, anonymized_text, created_at, tenant_id, legal_basis) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["doc-b1", "orig", "anon", 1735689600i64, "tenant_b", "consent"],
             )?;
             Ok::<_, rusqlite::Error>(())
         }).await.unwrap().unwrap();
@@ -449,8 +451,8 @@ mod tests {
         let conn = state.db.get().await.unwrap();
         conn.interact(|c| {
             c.execute(
-                "INSERT INTO documents (id, original_text, anonymized_text, created_at, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["doc-c1", "orig", "anon", 1735689600i64, "tenant_c"],
+                "INSERT INTO documents (id, original_text, anonymized_text, created_at, tenant_id, legal_basis) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["doc-c1", "orig", "anon", 1735689600i64, "tenant_c", "consent"],
             )
         }).await.unwrap().unwrap();
 

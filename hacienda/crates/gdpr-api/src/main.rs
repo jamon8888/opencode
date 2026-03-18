@@ -59,11 +59,12 @@ async fn main() -> Result<()> {
                 );
 
                 CREATE TABLE IF NOT EXISTS documents (
-                    id             TEXT PRIMARY KEY,
-                    original_text  TEXT NOT NULL,
+                    id              TEXT PRIMARY KEY,
+                    original_text   TEXT NOT NULL,
                     anonymized_text TEXT NOT NULL,
-                    created_at     INTEGER NOT NULL,
-                    tenant_id      TEXT NOT NULL DEFAULT ''
+                    created_at      INTEGER NOT NULL,
+                    tenant_id       TEXT NOT NULL DEFAULT '',
+                    legal_basis     TEXT NOT NULL DEFAULT 'legitimate_interest'
                 );
                 CREATE INDEX IF NOT EXISTS idx_docs_tenant ON documents(tenant_id);
 
@@ -116,6 +117,7 @@ async fn main() -> Result<()> {
                 "ALTER TABLE documents      ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE doc_chunks     ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE doc_entity_map ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE documents ADD COLUMN legal_basis TEXT NOT NULL DEFAULT 'legitimate_interest'",
                 "CREATE INDEX IF NOT EXISTS idx_docs_tenant    ON documents(tenant_id)",
                 "CREATE INDEX IF NOT EXISTS idx_chunks_tenant  ON doc_chunks(tenant_id)",
                 "CREATE INDEX IF NOT EXISTS idx_dem_tenant     ON doc_entity_map(tenant_id)",
