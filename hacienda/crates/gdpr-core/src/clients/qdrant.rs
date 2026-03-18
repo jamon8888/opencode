@@ -292,6 +292,54 @@ impl QdrantStore {
         Ok(())
     }
 
+    /// Embed query, search Qdrant filtered by `tenant_id`.
+    /// Returns at most `limit` hits ordered by score descending.
+    pub async fn search_tenant(
+        &self,
+        query:     &str,
+        tenant_id: &str,
+        limit:     u64,
+    ) -> anyhow::Result<Vec<QdrantHit>> {
+        let Some(ref emb) = self.embedding else {
+            return Err(anyhow::anyhow!("EMBEDDING_URL not set — cannot perform vector search"));
+        };
+
+        let vector = emb.embed(query).await?;
+
+        let resp: serde_json::Value = self
+            .client
+            .post(format!("{}/collections/{}/points/search", self.url, self.collection))
+            .json(&serde_json::json!({
+                "vector": vector,
+                "filter": {
+                    "must": [{ "key": "tenant_id", "match": { "value": tenant_id } }]
+                },
+                "limit":        limit,
+                "with_payload": true,
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let hits = resp["result"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|r| {
+                let doc_id     = r["payload"]["doc_id"].as_str()?.to_string();
+                let score      = r["score"].as_f64()? as f32;
+                let chunk_text = r["payload"]["chunk_text"].as_str().map(|s| s.to_string());
+                let chunk_idx  = r["payload"]["chunk_idx"].as_u64().map(|v| v as usize);
+                Some(QdrantHit { doc_id, score, chunk_text, chunk_idx })
+            })
+            .collect();
+
+        Ok(hits)
+    }
+
     /// Delete Qdrant points by explicit point IDs (chunk UUIDs).
     pub async fn delete_by_ids(&self, ids: &[String]) -> Result<()> {
         if ids.is_empty() {
@@ -425,5 +473,59 @@ mod tests {
 
         let expected_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, "acme/doc42/0".as_bytes()).to_string();
         assert_eq!(point["id"], expected_id);
+    }
+
+    #[tokio::test]
+    async fn test_search_tenant_sends_filter() {
+        let server     = MockServer::start().await;
+        let emb_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "embedding": vec![0.1f32; 384] }]
+            })))
+            .mount(&emb_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/collections/test_col/points/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": [{
+                    "score": 0.95,
+                    "payload": {
+                        "doc_id":     "doc99",
+                        "tenant_id":  "acme",
+                        "chunk_idx":  0,
+                        "chunk_text": "some text"
+                    }
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let store = QdrantStore {
+            client:     Client::new(),
+            url:        server.uri(),
+            collection: "test_col".to_string(),
+            embedding:  Some(Arc::new(EmbeddingClient::new(
+                format!("{}/", emb_server.uri()),
+                "test-model".to_string(),
+            ))),
+            dim: 384,
+        };
+
+        let hits = store.search_tenant("find something", "acme", 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].doc_id, "doc99");
+        assert!((hits[0].score - 0.95).abs() < 0.001);
+        assert_eq!(hits[0].chunk_text.as_deref(), Some("some text"));
+
+        // Verify the filter was sent in the request body
+        let reqs = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let must = &body["filter"]["must"][0];
+        assert_eq!(must["key"], "tenant_id");
+        assert_eq!(must["match"]["value"], "acme");
     }
 }
