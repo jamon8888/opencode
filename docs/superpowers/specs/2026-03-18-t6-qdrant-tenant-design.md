@@ -14,7 +14,7 @@ Wire Qdrant semantic search into `gdpr-api`, enforce per-tenant row isolation ac
 
 ## Prerequisite
 
-**T6 depends on T5 (`feat/v2-t5-thin-client`) being merged into `dev` first.** After T5 merges, `post_document` has a full implementation (anonymize via `anonymize_with_profile`, SQLite chunk storage, ClickHouse audit). If T6 is implemented before T5 merges, the `post_document` stub must be fully implemented from scratch as part of T6, following the pattern in `gdpr-api/src/handlers/anonymize.rs:62-116`.
+**T6 depends on T5 (`feat/v2-t5-thin-client`) being merged into `dev` first.** After T5 merges, `post_document` has a full implementation (anonymize via `anonymize_with_profile`, SQLite chunk storage, ClickHouse audit). If T6 is implemented before T5 merges, the `post_document` stub must be fully implemented from scratch as part of T6, following the pattern in `gdpr-api/src/handlers/anonymize.rs:68-92`.
 
 ---
 
@@ -86,6 +86,8 @@ GET /v1/audit           → WHERE tenant_id = ? [AND document_id = ?]
 ## New Methods on QdrantStore (`gdpr-core/src/clients/qdrant.rs`)
 
 ### `upsert_chunks_tenant`
+
+This method supersedes `upsert_chunks` for T6+ ingest. Do not use `upsert_chunks` in the T6 `post_document` path — its tuple layout `&[(String, String, usize)]` differs from the new method's `&[(usize, String)]`.
 
 ```rust
 /// Embed and upsert multiple text chunks, storing `tenant_id` in each point payload.
@@ -196,12 +198,15 @@ pub struct VecStore;
 ```
 and the field `pub vec_store: Option<Arc<VecStore>>`.
 
-**Add**:
+**Add** to `state.rs` (add the `use` import and the field):
 ```rust
-pub qdrant: Option<Arc<gdpr_core::clients::qdrant::QdrantStore>>,
+use gdpr_core::clients::qdrant::QdrantStore;
+
+// in AppState:
+pub qdrant: Option<Arc<QdrantStore>>,
 ```
 
-In `main.rs`, initialize:
+In `main.rs`, initialize (use the re-exported `QdrantStore` or the full path):
 ```rust
 qdrant: gdpr_core::clients::qdrant::QdrantStore::from_env(),
 ```
@@ -247,7 +252,7 @@ pub struct IngestResp {
 let session_id = uuid::Uuid::new_v4().to_string();
 
 // 2. Build session context and engine, then call anonymize_with_profile
-// Follow the exact pattern in handlers/anonymize.rs:67-78:
+// Follow the exact pattern in handlers/anonymize.rs:68-92:
 //   let mut session_ctx = SessionContext::new(profile);
 //   let pool_strings: Vec<String> = get_pool(&profile).iter().map(|s| s.to_string()).collect();
 //   let engine = TreatmentEngine::new(pool_strings);
