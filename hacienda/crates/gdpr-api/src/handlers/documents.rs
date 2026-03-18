@@ -83,6 +83,9 @@ pub async fn post_document(
     // Chunk the anonymized text (~200 words per chunk)
     let words: Vec<&str> = result.text.split_whitespace().collect();
     let chunk_size = 200usize;
+    // byte_pos tracks the offset in the whitespace-normalised representation
+    // (split_whitespace → join(" ")). Consumers reading chunks back use the
+    // same normalisation, so offsets are self-consistent.
     let mut byte_pos = 0usize;
     let chunk_rows: Vec<(usize, String, usize)> = words
         .chunks(chunk_size)
@@ -110,23 +113,25 @@ pub async fn post_document(
 
     let conn = state.db.get().await?;
     conn.interact(move |c| {
+        let tx = c.transaction()?;
         let now = chrono::Utc::now().timestamp();
-        c.execute(
+        tx.execute(
             "INSERT INTO documents (id, original_text, anonymized_text, created_at, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![doc_id2, original_text, anonymized_text, now, tenant_id2],
         )?;
         for (idx, chunk_text, byte_offset) in &chunk_rows2 {
-            c.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO doc_chunks (doc_id, chunk_idx, chunk_text, byte_offset, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![doc_id2, idx, chunk_text, byte_offset, tenant_id2],
             )?;
         }
         for (token, original) in &token_map2 {
-            c.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO doc_entity_map (document_id, entity_type, original_value, pseudonym, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![doc_id2, "PII", original, token, tenant_id2],
             )?;
         }
+        tx.commit()?;
         Ok::<_, rusqlite::Error>(())
     })
     .await
@@ -322,7 +327,8 @@ mod tests {
                 CREATE TABLE IF NOT EXISTS doc_entity_map (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, document_id TEXT NOT NULL,
                     entity_type TEXT NOT NULL, original_value TEXT NOT NULL,
-                    pseudonym TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT ''
+                    pseudonym TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '',
+                    UNIQUE(document_id, pseudonym, tenant_id)
                 );
             ")
         }).await.unwrap().unwrap();

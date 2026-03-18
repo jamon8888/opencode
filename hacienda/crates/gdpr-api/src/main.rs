@@ -84,7 +84,8 @@ async fn main() -> Result<()> {
                     entity_type   TEXT NOT NULL,
                     original_value TEXT NOT NULL,
                     pseudonym     TEXT NOT NULL,
-                    tenant_id     TEXT NOT NULL DEFAULT ''
+                    tenant_id     TEXT NOT NULL DEFAULT '',
+                    UNIQUE(document_id, pseudonym, tenant_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_dem_tenant ON doc_entity_map(tenant_id);
             ",
@@ -118,6 +119,7 @@ async fn main() -> Result<()> {
                 "CREATE INDEX IF NOT EXISTS idx_docs_tenant    ON documents(tenant_id)",
                 "CREATE INDEX IF NOT EXISTS idx_chunks_tenant  ON doc_chunks(tenant_id)",
                 "CREATE INDEX IF NOT EXISTS idx_dem_tenant     ON doc_entity_map(tenant_id)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_dem_unique ON doc_entity_map(document_id, pseudonym, tenant_id)",
             ];
             for stmt in &alter_stmts {
                 if let Err(e) = c.execute(stmt, []) {
