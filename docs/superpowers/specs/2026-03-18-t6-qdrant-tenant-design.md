@@ -78,6 +78,7 @@ GET /v1/audit           → WHERE tenant_id = ? [AND document_id = ?]
 | `gdpr-api/src/handlers/search.rs` | Qdrant-first with LIKE fallback; `tenant_id` filter on both paths |
 | `gdpr-api/src/handlers/audit.rs` | Add `tenant_id` WHERE clause; restore `doc_id` optional filter |
 | `gdpr-api/Cargo.toml` | No new deps — `gdpr-core` already declared |
+| `hacienda/Cargo.toml` | Enable `uuid` `v5` feature: `uuid = { version = "1", features = ["v4", "v5"] }` |
 
 ---
 
@@ -98,7 +99,7 @@ pub async fn upsert_chunks_tenant(
 
 **Point ID computation:**
 ```rust
-use uuid::{Uuid, Version};
+use uuid::Uuid;
 let ns = Uuid::NAMESPACE_URL;
 let point_id = Uuid::new_v5(&ns, format!("{tenant_id}/{doc_id}/{chunk_idx}").as_bytes());
 ```
@@ -205,6 +206,8 @@ qdrant: gdpr_core::clients::qdrant::QdrantStore::from_env(),
 ```
 `from_env()` returns `None` if `QDRANT_URL` is unset — service starts without Qdrant and falls back to LIKE search.
 
+Also in `main.rs`, remove the existing `vec_store: None` field from the `AppState { ... }` struct literal at the same time as removing `VecStore` from `state.rs`. Leaving the old field in the literal will cause a "unknown field `vec_store`" compile error.
+
 ---
 
 ## IngestResp
@@ -243,10 +246,15 @@ pub struct IngestResp {
 let session_id = uuid::Uuid::new_v4().to_string();
 
 // 2. Build session context and engine, then call anonymize_with_profile
-// Follow the exact pattern in handlers/anonymize.rs:62-78:
-//   let engine = state.engine_pool.get().await?;
-//   let mut session_ctx = SessionContext::new(profile.clone());
-//   let result = anonymize_with_profile(&text, profile, &mut session_ctx, &engine)?;
+// Follow the exact pattern in handlers/anonymize.rs:67-78:
+//   let mut session_ctx = SessionContext::new(profile);
+//   let pool_strings: Vec<String> = get_pool(&profile).iter().map(|s| s.to_string()).collect();
+//   let engine = TreatmentEngine::new(pool_strings);
+//   let result = tokio::task::spawn_blocking(move || {
+//       anonymize_with_profile(&text, profile, &mut session_ctx, &engine)
+//   }).await
+//   .map_err(|e| ApiError::Internal(format!("spawn_blocking join error: {e}")))?
+//   .map_err(|e| ApiError::Internal(format!("anonymize_with_profile failed: {e}")))?;
 
 // 3. Insert token_map into session_cache
 let sc = SessionCache {
@@ -378,13 +386,28 @@ pub struct AuditQuery {
 }
 ```
 
-ClickHouse query (add `tenant_id` filter and optional `doc_id`):
-```sql
-SELECT * FROM audit_log
-WHERE tenant_id = ?
-  AND (? = '' OR document_id = ?)
-ORDER BY created_at DESC
-LIMIT ?
+ClickHouse uses HTTP GET with URL-encoded raw SQL (see `audit.rs`). Build the query via `format!`, mirroring the existing `action` filter pattern:
+
+```rust
+// tenant_id comes from auth.tenant_id (JWT-validated — safe to interpolate)
+let tenant_filter = format!(" AND tenant_id = '{}'", auth.tenant_id);
+
+// doc_id must be UUID-shaped before interpolating
+let doc_filter = if let Some(ref id) = params.doc_id {
+    if !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        return Err(ApiError::Validation("invalid doc_id".into()));
+    }
+    format!(" AND document_id = '{id}'")
+} else {
+    String::new()
+};
+
+let query = format!(
+    "SELECT ... FROM gdpr.gdpr_audit \
+     WHERE 1=1{tenant_filter}{doc_filter} \
+     ORDER BY ts_unix DESC \
+     LIMIT {limit} FORMAT JSONEachRow"
+);
 ```
 
 ---
