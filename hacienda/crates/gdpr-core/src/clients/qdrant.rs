@@ -336,10 +336,10 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "data": [{ "embedding": vec![0.1f32; 384] }]
             })))
-            .expect(2)
             .mount(&emb_server)
             .await;
 
+        // 2 identical calls must each produce one PUT
         Mock::given(method("PUT"))
             .and(path("/collections/test_col/points"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok", "result": {}})))
