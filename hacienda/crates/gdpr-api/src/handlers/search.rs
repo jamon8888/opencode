@@ -82,6 +82,7 @@ mod tests {
     use dashmap::DashMap;
 
     static VAULT_KEY_SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
     fn ensure_vault_key() {
         VAULT_KEY_SET.get_or_init(|| {
             unsafe { std::env::set_var("CLOAKPIPE_VAULT_KEY", "test-vault-key-32bytespadded!!") };
@@ -189,9 +190,16 @@ mod tests {
             .mount(&qdrant_server).await;
 
         let mut state = make_state_no_qdrant().await;
-        unsafe { std::env::set_var("QDRANT_URL", qdrant_server.uri()) };
-        unsafe { std::env::set_var("EMBEDDING_URL", format!("{}/", emb_server.uri())) };
-        state.qdrant = gdpr_core::clients::qdrant::QdrantStore::from_env();
+        state.qdrant = {
+            let _guard = ENV_MUTEX.lock().unwrap();
+            unsafe { std::env::set_var("QDRANT_URL", qdrant_server.uri()) };
+            unsafe { std::env::set_var("EMBEDDING_URL", format!("{}/", emb_server.uri())) };
+            let q = gdpr_core::clients::qdrant::QdrantStore::from_env();
+            // Clean up after ourselves
+            unsafe { std::env::remove_var("QDRANT_URL") };
+            unsafe { std::env::remove_var("EMBEDDING_URL") };
+            q
+        };
 
         let Json(resp) = post_search(
             State(state),
