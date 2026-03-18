@@ -8,6 +8,7 @@ use crate::state::{AppState, AuthContext};
 pub struct SearchReq {
     pub query:   String,
     pub limit:   Option<usize>,
+    #[allow(dead_code)]
     pub profile: Option<String>,
 }
 
