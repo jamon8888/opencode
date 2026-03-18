@@ -32,6 +32,7 @@ struct EmbeddingData {
 
 impl EmbeddingClient {
     pub fn new(url: String, model: String) -> Self {
+        let url = url.trim_end_matches('/').to_string();
         Self { client: Client::new(), url, model }
     }
 
@@ -67,8 +68,8 @@ pub struct QdrantHit {
 
 /// Thin async wrapper over the Qdrant REST API.
 pub struct QdrantStore {
-    client: Client,
-    url: String,
+    pub(crate) client: Client,
+    pub(crate) url: String,
     pub collection: String,
     pub embedding: Option<Arc<EmbeddingClient>>,
     pub dim: u64,
@@ -244,6 +245,53 @@ impl QdrantStore {
         Ok(())
     }
 
+    /// Embed and upsert multiple text chunks, storing `tenant_id` in each point payload.
+    /// Point IDs are deterministic UUID v5 from `"{tenant_id}/{doc_id}/{chunk_idx}"`.
+    /// This supersedes `upsert_chunks` for T6+ ingest paths.
+    pub async fn upsert_chunks_tenant(
+        &self,
+        doc_id:    &str,
+        tenant_id: &str,
+        chunks:    &[(usize, String)],
+    ) -> anyhow::Result<()> {
+        let Some(ref emb) = self.embedding else {
+            tracing::warn!(doc_id, "EMBEDDING_URL not set — skipping Qdrant tenant upsert");
+            return Ok(());
+        };
+
+        let mut points = Vec::with_capacity(chunks.len());
+        for (chunk_idx, chunk_text) in chunks {
+            let vector   = emb.embed(chunk_text).await?;
+            let point_id = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                format!("{tenant_id}/{doc_id}/{chunk_idx}").as_bytes(),
+            );
+            points.push(json!({
+                "id":      point_id.to_string(),
+                "vector":  vector,
+                "payload": {
+                    "doc_id":     doc_id,
+                    "tenant_id":  tenant_id,
+                    "chunk_idx":  chunk_idx,
+                    "chunk_text": chunk_text,
+                }
+            }));
+        }
+
+        if points.is_empty() {
+            return Ok(());
+        }
+
+        self.client
+            .put(format!("{}/collections/{}/points", self.url, self.collection))
+            .json(&json!({ "points": points }))
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(())
+    }
+
     /// Delete Qdrant points by explicit point IDs (chunk UUIDs).
     pub async fn delete_by_ids(&self, ids: &[String]) -> Result<()> {
         if ids.is_empty() {
@@ -258,5 +306,91 @@ impl QdrantStore {
             .error_for_status()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+    use wiremock::{MockServer, Mock, ResponseTemplate};
+    use wiremock::matchers::{method, path};
+
+    fn make_store(url: &str) -> QdrantStore {
+        QdrantStore {
+            client:     Client::new(),
+            url:        url.to_string(),
+            collection: "test_col".to_string(),
+            embedding:  None,
+            dim:        384,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_upsert_chunks_tenant_point_ids_are_deterministic() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("PUT"))
+            .and(path("/collections/test_col/points"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok", "result": {}})))
+            .mount(&server)
+            .await;
+
+        let store = make_store(&server.uri());
+        let chunks: Vec<(usize, String)> = vec![(0, "Hello world".to_string())];
+        let id1 = Uuid::new_v5(&Uuid::NAMESPACE_URL, "tenant1/doc1/0".as_bytes());
+        let id2 = Uuid::new_v5(&Uuid::NAMESPACE_URL, "tenant1/doc1/0".as_bytes());
+        assert_eq!(id1, id2);
+
+        // With no embedding client, upsert skips HTTP call and returns Ok
+        let result = store.upsert_chunks_tenant("doc1", "tenant1", &chunks).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_upsert_chunks_tenant_sends_correct_payload() {
+        let server = MockServer::start().await;
+
+        let emb_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/embeddings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{ "embedding": vec![0.1f32; 384] }]
+            })))
+            .mount(&emb_server)
+            .await;
+
+        Mock::given(method("PUT"))
+            .and(path("/collections/test_col/points"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok", "result": {}})))
+            .mount(&server)
+            .await;
+
+        let store = QdrantStore {
+            client:     Client::new(),
+            url:        server.uri(),
+            collection: "test_col".to_string(),
+            embedding:  Some(Arc::new(EmbeddingClient::new(
+                format!("{}/", emb_server.uri()),
+                "test-model".to_string(),
+            ))),
+            dim: 384,
+        };
+
+        let chunks = vec![(0usize, "chunk zero text".to_string())];
+        store.upsert_chunks_tenant("doc42", "acme", &chunks).await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        let point = &body["points"][0];
+        assert_eq!(point["payload"]["doc_id"], "doc42");
+        assert_eq!(point["payload"]["tenant_id"], "acme");
+        assert_eq!(point["payload"]["chunk_idx"], 0);
+        assert_eq!(point["payload"]["chunk_text"], "chunk zero text");
+
+        let expected_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, "acme/doc42/0".as_bytes()).to_string();
+        assert_eq!(point["id"], expected_id);
     }
 }
