@@ -50,9 +50,11 @@ pub async fn post_document(
     let tenant_id  = auth.tenant_id.clone();
 
     // Parse profile
-    let profile: AnonProfile = req.profile.as_deref()
-        .and_then(|p| serde_json::from_value(serde_json::Value::String(p.to_string())).ok())
-        .unwrap_or_default();
+    let profile: AnonProfile = match req.profile.as_deref() {
+        None => AnonProfile::default(),
+        Some(p) => serde_json::from_value(serde_json::Value::String(p.to_string()))
+            .map_err(|_| ApiError::UnknownProfile(format!("Unknown profile: {p}")))?,
+    };
 
     // Anonymize (L1 regex, CPU-bound)
     let mut session_ctx  = SessionContext::new(profile);
@@ -81,10 +83,16 @@ pub async fn post_document(
     // Chunk the anonymized text (~200 words per chunk)
     let words: Vec<&str> = result.text.split_whitespace().collect();
     let chunk_size = 200usize;
+    let mut byte_pos = 0usize;
     let chunk_rows: Vec<(usize, String, usize)> = words
         .chunks(chunk_size)
         .enumerate()
-        .map(|(i, w)| (i, w.join(" "), i * chunk_size))
+        .map(|(i, w)| {
+            let start  = byte_pos;
+            let joined = w.join(" ");
+            byte_pos  += joined.len() + 1; // +1 for the space between chunks
+            (i, joined, start)
+        })
         .collect();
 
     let chunk_count = chunk_rows.len();
@@ -115,9 +123,9 @@ pub async fn post_document(
         }
         for (token, original) in &token_map2 {
             c.execute(
-                "INSERT INTO doc_entity_map (document_id, entity_type, original_value, pseudonym, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR IGNORE INTO doc_entity_map (document_id, entity_type, original_value, pseudonym, tenant_id) VALUES (?1, ?2, ?3, ?4, ?5)",
                 rusqlite::params![doc_id2, "PII", original, token, tenant_id2],
-            ).ok(); // ignore duplicate entity errors
+            )?;
         }
         Ok::<_, rusqlite::Error>(())
     })
@@ -241,9 +249,11 @@ pub async fn delete_document(
             return Ok(false);
         }
 
-        c.execute("DELETE FROM doc_chunks     WHERE doc_id      = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
-        c.execute("DELETE FROM doc_entity_map WHERE document_id = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
-        c.execute("DELETE FROM documents      WHERE id          = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
+        let tx = c.transaction()?;
+        tx.execute("DELETE FROM doc_chunks     WHERE doc_id      = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
+        tx.execute("DELETE FROM doc_entity_map WHERE document_id = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
+        tx.execute("DELETE FROM documents      WHERE id          = ?1 AND tenant_id = ?2", rusqlite::params![id2, tenant_id])?;
+        tx.commit()?;
         Ok::<_, rusqlite::Error>(true)
     })
     .await
@@ -276,6 +286,14 @@ mod tests {
     use std::sync::Arc;
     use dashmap::DashMap;
     use deadpool_sqlite::Config;
+
+    static VAULT_KEY_SET: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+    fn ensure_vault_key() {
+        VAULT_KEY_SET.get_or_init(|| {
+            unsafe { std::env::set_var("CLOAKPIPE_VAULT_KEY", "test-vault-key-32bytespadded!!") };
+        });
+    }
 
     /// Build a minimal in-memory AppState for document handler tests.
     async fn make_state() -> AppState {
@@ -311,7 +329,7 @@ mod tests {
 
         let vault = std::env::temp_dir()
             .join(format!("gdpr-t6-test-{}.db", uuid::Uuid::new_v4()));
-        unsafe { std::env::set_var("CLOAKPIPE_VAULT_KEY", "test-vault-key-32bytespadded!!") };
+        ensure_vault_key();
         let engine = gdpr_core::pii::engine::PiiEngine::load_for_test(
             vault.to_str().unwrap(),
         ).expect("test engine");
