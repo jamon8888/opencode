@@ -35,8 +35,9 @@ After T5, `gdpr-mcp` is a thin HTTP client — all document business logic lives
 
 ```
 POST /v1/documents
-  → anonymize_with_profile  (gdpr-core, unchanged)
-  → generate session_id, insert into session_cache (manual, see session_id section)
+  → generate session_id (uuid::Uuid::new_v4)
+  → anonymize_with_profile  (gdpr-core, unchanged) → result.token_map
+  → build SessionCache from result.token_map, insert into session_cache
   → INSERT documents        (SQLite, + tenant_id)
   → INSERT doc_chunks       (SQLite, + tenant_id)
   → INSERT doc_entity_map   (SQLite, + tenant_id)
@@ -278,7 +279,7 @@ state.session_cache.insert(session_id.clone(), sc);
 
 ### Upsert (post_document)
 
-After SQLite writes succeed, fire-and-forget:
+After SQLite writes succeed, fire-and-forget. `chunk_rows` is the `Vec<(usize, String, usize)>` (chunk_idx, chunk_text, byte_offset) built during the SQLite `INSERT INTO doc_chunks` step of `post_document` — it is already in scope when this block runs:
 
 ```rust
 if let Some(ref q) = state.qdrant {
@@ -394,9 +395,8 @@ let tenant_filter = format!(" AND tenant_id = '{}'", auth.tenant_id);
 
 // doc_id must be UUID-shaped before interpolating
 let doc_filter = if let Some(ref id) = params.doc_id {
-    if !id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-        return Err(ApiError::Validation("invalid doc_id".into()));
-    }
+    // Validate as UUID before interpolating into raw SQL string
+    uuid::Uuid::parse_str(id).map_err(|_| ApiError::Validation("invalid doc_id".into()))?;
     format!(" AND document_id = '{id}'")
 } else {
     String::new()
