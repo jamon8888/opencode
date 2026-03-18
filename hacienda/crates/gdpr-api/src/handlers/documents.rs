@@ -68,18 +68,6 @@ pub async fn post_document(
     .map_err(|e| ApiError::Internal(format!("spawn_blocking join: {e}")))?
     .map_err(|e| ApiError::Internal(format!("anonymize_with_profile: {e}")))?;
 
-    // Populate session_cache (for deanonymize calls)
-    {
-        let dm = dashmap::DashMap::new();
-        for (token, original) in &result.token_map {
-            dm.insert(token.clone(), original.clone());
-        }
-        state.session_cache.insert(session_id.clone(), SessionCache {
-            token_map:  dm,
-            created_at: std::time::Instant::now(),
-        });
-    }
-
     // Chunk the anonymized text (~200 words per chunk)
     let words: Vec<&str> = result.text.split_whitespace().collect();
     let chunk_size = 200usize;
@@ -138,6 +126,18 @@ pub async fn post_document(
     .await
     .map_err(|e| ApiError::Internal(format!("db interact: {e}")))?
     .map_err(|e: rusqlite::Error| ApiError::Database(e.to_string()))?;
+
+    // Populate session_cache only after successful DB write
+    {
+        let dm = dashmap::DashMap::new();
+        for (token, original) in &result.token_map {
+            dm.insert(token.clone(), original.clone());
+        }
+        state.session_cache.insert(session_id.clone(), SessionCache {
+            token_map:  dm,
+            created_at: std::time::Instant::now(),
+        });
+    }
 
     // Fire-and-forget Qdrant upsert
     if let Some(ref q) = state.qdrant {
