@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use gdpr_core::clients::qdrant::QdrantStore;
 use std::time::Instant;
 use dashmap::DashMap;
 use reqwest::Client;
@@ -16,7 +17,7 @@ pub struct AppState {
     pub clickhouse:    Option<Arc<crate::clients::ClickHouseClient>>,
 
     // New T4 fields
-    pub vec_store:           Option<Arc<VecStore>>,
+    pub qdrant:              Option<Arc<QdrantStore>>,
     pub http_client:         Client,
     pub key_cache:           Arc<DashMap<String, CachedKey>>,
     pub tensorzero_base_url: String,
@@ -71,5 +72,3 @@ impl AuthContext {
     }
 }
 
-/// Placeholder for optional vector store. Real implementation comes in T6/T7.
-pub struct VecStore;
